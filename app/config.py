@@ -51,8 +51,13 @@ class Settings(BaseSettings):
     imap_user: str | None = None
     imap_password: SecretStr | None = None  # Gmail: use an App Password, never the account password
     imap_folder: str = "INBOX"  # a Gmail label is exposed as an IMAP folder, e.g. "Disputes"
-    email_subject_keywords: str = "dispute,refund,charge,charged,billing,invoice,fraud,disputa,reembolso,cobro"
+    # Optional subject filter (comma-separated). Empty = every human email in the folder is a ticket;
+    # newsletters, bounces, auto-replies and our own replies are always skipped.
+    email_subject_keywords: str = ""
     email_poll_interval_s: int = Field(default=30, ge=5, le=3600)
+    # Read mail (seen or unseen) that arrived in the last N minutes, so a message already opened on
+    # the phone is still processed. Each message is ingested once (UID memory + Message-Id dedupe).
+    email_lookback_minutes: int = Field(default=120, ge=1, le=10_080)
 
     # --- Email channel: SMTP replies (optional, real delivery) ---------------
     enable_email_sender: bool = False

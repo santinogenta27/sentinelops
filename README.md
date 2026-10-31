@@ -24,7 +24,7 @@ cd C:\Users\usuario\sentinelops
 
 uvicorn app.main:app --reload --port 8000     # cockpit en http://127.0.0.1:8000
 pytest tests/eval_suite.py -v                  # suite de evaluación (gate de CI)
-pytest                                         # todo: unit + integración + API + email + eval (121 tests)
+pytest                                         # todo: unit + integración + API + email + eval (125 tests)
 mypy                                           # tipado estricto (--strict)
 ```
 
@@ -106,7 +106,7 @@ Cockpit "📧 Send Live Test Email" ───────┘   (dedupe Message-I
 | Pieza | Dónde | Detalles |
 |---|---|---|
 | Webhook | `POST /api/webhooks/inbound-email` | JSON o form-encoded. Acepta `from/subject/body_plain/message_id` y los alias de Mailgun (`sender`, `body-plain`, `Message-Id`), SendGrid (`text`) y Postmark (`From`, `TextBody`, `MessageID`). Con `INBOUND_WEBHOOK_SECRET` exige el header `X-Webhook-Token`. |
-| Listener IMAP | `app/integrations/imap_listener.py` | `ENABLE_EMAIL_LISTENER=true`. Lee correos UNSEEN de la carpeta o etiqueta configurada, filtra por palabras clave del asunto, ignora auto-respuestas y rebotes, y marca `\Seen` **después** de crear el ticket. Si falla, aplica backoff exponencial. `POST /api/email/poll` fuerza una lectura inmediata. |
+| Listener IMAP | `app/integrations/imap_listener.py` | `ENABLE_EMAIL_LISTENER=true`. Lee los correos que llegaron en los últimos `EMAIL_LOOKBACK_MINUTES` (120 por defecto), **leídos o no** (un email ya abierto en el teléfono también se procesa), del más nuevo al más viejo. Cualquier asunto sirve; el filtro `EMAIL_SUBJECT_KEYWORDS` es opcional. Ignora rebotes, auto-respuestas, newsletters, remitentes no-reply y las respuestas que envió el propio agente. Cada UID se evalúa una sola vez y el `Message-Id` evita tickets duplicados tras un reinicio. Marca `\Seen` **después** de crear el ticket y aplica backoff exponencial si falla. El botón **📥 Revisar Bandeja Ahora** (`POST /api/email/poll-now`) fuerza una lectura inmediata y dice qué encontró. |
 | Simulador | botón **📧 Send Live Test Email** | Ventana tipo Gmail con plantillas. Usa el mismo pipeline (`POST /api/email/simulate`) y el grafo arranca solo vía SSE. |
 | Respuesta | pestaña **Ledger / Outbox** | Vista previa del email HTML renderizado (iframe con sandbox), con asunto `Re: …` e `In-Reply-To`. |
 | Supervisor | banner **⚠️ New Email requires billing supervisor approval** | Se dispara al entrar en `HumanGate`. También guarda (y opcionalmente envía) un email de alerta y actualiza el título de la pestaña. Si el navegador lo permite, muestra una notificación de escritorio. |
@@ -115,7 +115,8 @@ Cockpit "📧 Send Live Test Email" ───────┘   (dedupe Message-I
 - **Idempotencia:** el mismo `Message-Id` (reintentos del proveedor, re-lecturas IMAP) produce un solo ticket.
 - **Identidad:** si el remitente es dueño de la cuenta, esa es la identidad autenticada. Si escribe desde otra dirección (por ejemplo, un email personal que menciona `alice@acme-corp.com`), el riesgo sube a ALTO (`sender_not_account_owner`). En ese caso cualquier pago requiere aprobación humana y la respuesta no revela el nombre del titular (POL-ID-001).
 - **Envío SMTP real solo para correo real:** las simulaciones del cockpit nunca salen por SMTP, así el demo no puede escribirle a dominios reales.
-- **Sin loops de correo:** se ignoran mensajes de la propia dirección de soporte y las auto-respuestas.
+- **Sin loops de correo:** cada respuesta del agente lleva `Auto-Submitted: auto-replied`, el header `X-SentinelOps-Ticket` y un `Message-ID` propio, y el listener nunca la reprocesa. Por eso se puede escribir desde la misma casilla de soporte (auto-envío en modo demo).
+- **Nunca le escribe a desconocidos:** la respuesta por SMTP sólo sale hacia el dueño de la cuenta, un alias verificado o la propia casilla. El resto queda en el outbox.
 
 **Probar con Gmail real:** activá 2FA, creá una *App Password* y poné en `.env`:
 `ENABLE_EMAIL_LISTENER=true`, `IMAP_USER=tu@gmail.com`, `IMAP_PASSWORD=<app password>` y, para contestar,
@@ -161,7 +162,7 @@ Nota: el balance de test puede quedar negativo, porque Stripe no devuelve su com
 | `GET` | `/api/ledger` · `/api/graph` · `/api/health` · `/api/eval/report` | Reembolsos/outbox · topología · estado LLM · último reporte de eval |
 | `POST` | `/api/admin/faults` · `/api/admin/reset` | Inyección de fallos (chaos) · re-seed del ledger |
 | `POST` | `/api/webhooks/inbound-email` · `/api/email/simulate` | Email entrante (proveedor, con token) · simulador del cockpit |
-| `GET`/`POST` | `/api/email/status` · `/api/inbox` · `/api/email/poll` | Estado del canal · emails recibidos · lectura IMAP inmediata |
+| `GET`/`POST` | `/api/email/status` · `/api/inbox` · `/api/email/poll-now` | Estado del canal · emails recibidos · lectura IMAP inmediata |
 | `GET`/`POST` | `/api/email/config` · `/api/email/test-connection` · `/api/email/save-config` · `/api/email/disconnect` | Casilla conectada desde la UI (sin exponer la contraseña) |
 | `GET`/`PUT` | `/api/autopilot` | Estado del Auto-Pilot `{enabled, max_usd}` |
 | `GET` | `/api/stripe/dashboard-sync` | Balance + reembolsos + cobros de Stripe en tiempo real |

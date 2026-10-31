@@ -120,11 +120,34 @@ def from_webhook_payload(payload: InboundEmailPayload) -> InboundEmail:
     )
 
 
+OUTBOUND_MARKER_HEADER = "X-SentinelOps-Ticket"
+OUTBOUND_MESSAGE_ID_PREFIX = "<sentinelops-reply-"
+_NO_REPLY_RE = re.compile(r"(^|[<\s\"])(no-?reply|do-?not-?reply|mailer-daemon|postmaster|notifications?)[@+.-]", re.IGNORECASE)
+
+
+def is_own_outbound(message_id: str) -> bool:
+    """A reply/alert this engine sent (it lands back in the inbox when the customer is ourselves)."""
+    return message_id.strip().lower().startswith(OUTBOUND_MESSAGE_ID_PREFIX)
+
+
+def auto_generated_reason(msg: EmailMessage) -> str | None:
+    """Why a message must never become a ticket (prevents mail loops and newsletter noise), or None."""
+    if msg.get(OUTBOUND_MARKER_HEADER) or is_own_outbound(str(msg.get("Message-ID", ""))):
+        return "respuesta enviada por SentinelOps"
+    if str(msg.get("Auto-Submitted", "no")).strip().lower() != "no":
+        return "auto-respuesta / rebote"
+    if str(msg.get("Precedence", "")).strip().lower() in {"bulk", "junk", "list"}:
+        return "envío masivo"
+    if msg.get("List-Unsubscribe") or msg.get("List-Id"):
+        return "newsletter / lista de correo"
+    if _NO_REPLY_RE.search(str(msg.get("From", ""))):
+        return "remitente automático (no-reply)"
+    return None
+
+
 def is_auto_generated(msg: EmailMessage) -> bool:
-    """Never answer bounces / auto-replies (prevents mail loops)."""
-    auto = str(msg.get("Auto-Submitted", "no")).lower()
-    sender = str(msg.get("From", "")).lower()
-    return auto != "no" or "mailer-daemon" in sender or str(msg.get("Precedence", "")).lower() in {"bulk", "junk", "list"}
+    """Never answer bounces / auto-replies / newsletters / our own replies (prevents mail loops)."""
+    return auto_generated_reason(msg) is not None
 
 
 def parse_rfc822(raw: bytes) -> tuple[EmailMessage, InboundEmail]:

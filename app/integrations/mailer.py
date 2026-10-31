@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import smtplib
 import ssl
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from typing import Literal
 
 from app.config import Settings
 from app.db.database import Database, iso, utcnow
+from app.integrations.email_inbound import OUTBOUND_MARKER_HEADER, OUTBOUND_MESSAGE_ID_PREFIX
 from app.integrations.email_templates import render_customer_email, render_supervisor_alert
 from app.integrations.faults import FaultInjector
 
@@ -79,11 +81,19 @@ class Mailer:
         await asyncio.to_thread(transport, msg)
 
     @staticmethod
-    def _build(*, sender: str, to: str, subject: str, text: str, html_body: str, in_reply_to: str | None) -> EmailMessage:
+    def _build(
+        *, sender: str, to: str, subject: str, text: str, html_body: str, in_reply_to: str | None, ticket_id: str
+    ) -> EmailMessage:
         msg = EmailMessage()
         msg["From"] = sender
         msg["To"] = to
         msg["Subject"] = subject
+        # Loop protection: when the customer is the support mailbox itself (demo self-send) our reply
+        # lands back in the watched inbox; these markers make the listener skip it (RFC 3834).
+        domain = sender.rsplit("@", 1)[-1].rstrip(">") or "sentinelops.local"
+        msg["Message-ID"] = f"{OUTBOUND_MESSAGE_ID_PREFIX}{ticket_id.lower()}-{secrets.token_hex(4)}@{domain}>"
+        msg["Auto-Submitted"] = "auto-replied"
+        msg[OUTBOUND_MARKER_HEADER] = ticket_id
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
             msg["References"] = in_reply_to
@@ -103,6 +113,7 @@ class Mailer:
         channel: str,
         inbound_source: str | None,
         in_reply_to: str | None,
+        verified_recipient: bool = True,
     ) -> DeliveryStatus:
         self.faults.check(self.TOOL_NAME)
         html_body = render_customer_email(
@@ -118,8 +129,13 @@ class Mailer:
             if (cur.rowcount or 0) == 0:
                 return "duplicate"  # resumed / replayed graph: never email the customer twice
 
+        self_send = bool(to_address) and str(to_address).lower() == self.settings.support_email_address.lower()
         if not (
-            self.real_delivery_enabled and channel == "email" and inbound_source in REAL_DELIVERY_SOURCES and to_address
+            self.real_delivery_enabled
+            and channel == "email"
+            and inbound_source in REAL_DELIVERY_SOURCES
+            and to_address
+            and (verified_recipient or self_send)  # never auto-mail strangers from the support mailbox
         ):
             return "outbox"
         status: DeliveryStatus = "smtp"
@@ -127,7 +143,7 @@ class Mailer:
             await self._deliver(
                 self._build(
                     sender=self._from_header(), to=to_address, subject=subject, text=body,
-                    html_body=html_body, in_reply_to=in_reply_to,
+                    html_body=html_body, in_reply_to=in_reply_to, ticket_id=ticket_id,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - delivery failure must not fail the ticket
@@ -180,7 +196,7 @@ class Mailer:
                     self._build(
                         sender=self._from_header(), to=recipient, subject=alert_subject,
                         text=f"Approval required for {ticket_id}: {action_type} {amount:,.2f} {currency}.\n\n{summary}",
-                        html_body=html_body, in_reply_to=None,
+                        html_body=html_body, in_reply_to=None, ticket_id=ticket_id,
                     )
                 )
             except Exception as exc:  # noqa: BLE001

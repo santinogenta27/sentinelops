@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from app.integrations.email_inbound import InboundEmail
+from app.integrations.email_inbound import InboundEmail, is_own_outbound
 from app.models.schemas import ChannelMeta
 from app.services.runtime import SentinelRuntime, new_ticket_id
 
@@ -32,8 +32,10 @@ class InboundEmailService:
         treats the request as coming from an unverified sender (forced HITL on payouts).
         """
         rt = self.runtime
-        if email.from_address == rt.settings.support_email_address.lower():
-            raise ValueError("refusing to ingest mail sent by our own support address (loop protection)")
+        # Self-send is allowed (demo: write from the support mailbox to itself); only the replies
+        # this engine sent are refused, so answering ourselves can never loop.
+        if is_own_outbound(email.message_id):
+            raise ValueError("refusing to ingest a reply sent by SentinelOps itself (loop protection)")
         tid = new_ticket_id()
         existing = await rt.db.record_inbound_email(
             message_id=email.message_id,

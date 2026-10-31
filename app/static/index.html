@@ -65,6 +65,11 @@
   @keyframes rowflash { from { background:#e6e3ff; } to { background:transparent; } }
   .stripe tr.flash td { animation: rowflash 2.6s ease-out; }
   .seg button.on { background:#4f46e5; color:#fff; border-color:#6366f1; }
+  .rcpt { background:#fff; color:#1a1f36; border-radius:14px; box-shadow:0 30px 80px rgba(0,0,0,.6); overflow:hidden; font-family: -apple-system, "Segoe UI", Inter, sans-serif; }
+  .rcpt .row { display:flex; justify-content:space-between; gap:12px; padding:7px 0; border-top:1px solid #e3e8ee; font-size:13px; }
+  .rcpt .row span:first-child { color:#697386; }
+  @keyframes pop { from { transform:scale(.6); opacity:0; } to { transform:none; opacity:1; } }
+  .pop { animation: pop .35s cubic-bezier(.2,1.4,.4,1); }
   iframe.mailpreview { width:100%; height:440px; border:1px solid #1f2937; border-radius:10px; background:#f4f5f7; }
 </style>
 </head>
@@ -83,6 +88,7 @@
     <div id="hdr-llm" class="pill bg-slate-800 text-slate-300"><i data-lucide="cpu" class="w-3 h-3"></i>LLM …</div>
     <div id="hdr-rules" class="pill bg-slate-800 text-slate-300"></div>
     <button id="hdr-mail" class="pill bg-slate-800 text-slate-300 cursor-pointer hover:bg-slate-700" title="Email channel — click to configure">⚪ Correo no conectado (Click para configurar)</button>
+    <button id="btn-pollnow" class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 text-sky-200 hover:bg-sky-500/20 text-xs font-semibold" title="POST /api/email/poll-now: revisa la casilla conectada ahora mismo">📥 Revisar Bandeja Ahora</button>
     <button id="btn-autopilot" class="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:border-emerald-500/60 text-xs font-semibold" role="switch" aria-checked="false" title="Auto-Pilot: zero-touch approval of policy-compliant payouts">
       <span>⚡ Auto-Pilot:</span><span id="ap-label">…</span><span id="ap-switch" class="switch"></span>
     </button>
@@ -286,7 +292,7 @@
       <label class="flex items-center gap-2 mt-2"><input id="mc-sender" type="checkbox" checked /> Responder automáticamente al cliente por SMTP desde esta casilla</label>
       <div class="mt-3 panel2 p-2.5">
         <div class="font-semibold">Remitente de prueba (opcional, modo demo)</div>
-        <div class="muted text-[11px] mb-1.5">Vincula tu email personal a un cliente del ledger para probar el ciclo completo con emails reales. Escribí desde <b>otra</b> cuenta (no desde la casilla de soporte).</div>
+        <div class="muted text-[11px] mb-1.5">Vincula tu email personal a un cliente del ledger para probar el ciclo completo con emails reales. Podés escribir desde otra cuenta <b>o desde la misma casilla</b> (auto-envío permitido: las respuestas del agente se marcan y nunca se reprocesan).</div>
         <div class="grid grid-cols-[1fr_1fr] gap-1.5">
           <input id="mc-alias" type="email" placeholder="tu.email.personal@gmail.com" class="px-2.5 py-1.5" />
           <select id="mc-alias-cus" class="px-2 py-1.5"><option value="">— cliente —</option></select>
@@ -313,6 +319,25 @@
   </div>
 </div>
 
+<!-- ============================== STRIPE RECEIPT (shown when an email refund completes) ============================== -->
+<div id="receipt" class="fixed inset-0 z-50 hidden">
+  <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" data-rclose></div>
+  <div class="relative max-w-md mx-auto mt-[8vh] rcpt fade-in" role="dialog" aria-labelledby="rc-title">
+    <div class="px-6 pt-6 pb-4 text-center" style="background:linear-gradient(135deg,#635bff,#7a73ff);color:#fff">
+      <div class="pop w-14 h-14 mx-auto rounded-full bg-white/20 grid place-items-center text-3xl">✓</div>
+      <div id="rc-title" class="mt-2 text-sm font-semibold opacity-90">Reembolso exitoso · Stripe</div>
+      <div id="rc-amount" class="text-4xl font-bold tracking-tight mt-1">$0.00</div>
+      <div id="rc-sub" class="text-xs opacity-85 mt-1"></div>
+    </div>
+    <div id="rc-body" class="px-6 py-3"></div>
+    <div class="px-6 pb-5 pt-1 flex flex-wrap gap-2 justify-end">
+      <button data-rclose class="px-3 py-2 rounded-md text-sm font-semibold text-[#3c4257] hover:bg-slate-100">Cerrar</button>
+      <button id="rc-panel" class="px-3 py-2 rounded-md text-sm font-semibold border border-[#d5dbe1] text-[#3c4257] hover:bg-slate-50">💳 Ver Stripe Live Dashboard</button>
+      <a id="rc-open" class="px-3 py-2 rounded-md text-sm font-semibold bg-[#635bff] hover:bg-[#5851ea] text-white" target="_blank" rel="noopener noreferrer">↗ Abrir en Stripe.com</a>
+    </div>
+  </div>
+</div>
+
 <div id="toasts" class="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 max-w-sm"></div>
 
 <script>
@@ -329,13 +354,13 @@ async function api(path, opts = {}) {
   if (!res.ok) throw new Error(body.detail ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : res.statusText);
   return body;
 }
-function toast(msg, kind = "info") {
+function toast(msg, kind = "info", ms = 4500) {
   const colors = {info: "border-indigo-500/40", ok: "border-emerald-500/40", warn: "border-amber-500/40", bad: "border-rose-500/40"};
   const el = document.createElement("div");
   el.className = `panel px-3 py-2 text-sm fade-in border ${colors[kind] || colors.info}`;
   el.textContent = msg;
   $("#toasts").appendChild(el);
-  setTimeout(() => el.remove(), 4500);
+  setTimeout(() => el.remove(), ms);
 }
 const STATUS_STYLE = {
   TRIAGING: "bg-sky-500/15 text-sky-300", INVESTIGATING: "bg-sky-500/15 text-sky-300", PLANNING: "bg-sky-500/15 text-sky-300",
@@ -1071,10 +1096,67 @@ function onStripeMirrored(ev) {
   if (!mirrored.length) return;
   mirrored.forEach(m => m.stripe_refund_id && stripeFlash.add(m.stripe_refund_id));
   const total = mirrored.reduce((a, m) => a + m.amount, 0);
-  const isEmail = (ticketChannels[ev.ticket_id] || "") === "email";
   toast(`💳 ${money(total)} reembolsado en Stripe (${mirrored.map(m => m.stripe_refund_id).join(", ")})`, "ok");
-  if (isEmail && ev.ticket_id === selected) showTab("stripe"); else if (activeTab === "stripe") loadStripe();
+  if (activeTab === "stripe") loadStripe();
 }
+
+// ---------------------------------------------------------------- stripe receipt (email refunds, on screen)
+const receiptShown = new Set();
+async function showReceipt(ticketId) {
+  if (receiptShown.has(ticketId)) return;
+  let t;
+  try { t = await api(`/api/tickets/${ticketId}`); } catch { return; }
+  const r = t.execution_receipt;
+  if (!r || !r.executed || !(r.refunds || []).length) return;
+  receiptShown.add(ticketId);
+  const mirror = (t.stripe_mirror || []).filter(m => m.stripe_refund_id);
+  const total = r.refunds.reduce((a, x) => a + x.amount, 0);
+  const row = (k, v) => `<div class="row"><span>${k}</span><span class="font-semibold text-right break-all">${v}</span></div>`;
+  $("#rc-amount").textContent = money(total);
+  $("#rc-sub").textContent = `${t.reviewer === "auto-pilot" ? "⚡ Auto-Pilot · cero clics" : "Aprobado por " + (t.reviewer || "política")} · ${t.ticket_id}`;
+  $("#rc-title").textContent = mirror.length ? "Reembolso exitoso · Stripe (modo test)" : "Reembolso ejecutado · ledger";
+  $("#rc-body").innerHTML =
+    row("Cliente", esc(t.customer_email || "—")) +
+    (t.channel === "email" ? row("Email de", esc(t.sender_email || "—")) + row("Asunto", esc(t.email_subject || "(sin asunto)")) : "") +
+    (mirror.length
+      ? mirror.map(m => row("Refund ID", `<span class="mono">${esc(m.stripe_refund_id)}</span>`) + row("PaymentIntent", `<span class="mono">${esc(m.payment_intent_id || "—")}</span>`)).join("")
+      : r.refunds.map(x => row("Refund (ledger)", `<span class="mono">${esc(x.refund_id)}</span>`)).join("")) +
+    row("Estado", `<span style="background:#d7f7c2;color:#05690d;border-radius:4px;padding:1px 6px;font-size:11px">succeeded ✓</span>`) +
+    row("Transacción", `<span class="mono">${esc(r.refunds.map(x => x.transaction_id).join(", "))}</span>`) +
+    row("Respuesta al cliente", t.email_dispatched ? "enviada ✓" : "pendiente") +
+    (mirror.length ? "" : `<div class="text-[11px] text-[#697386] pt-2">Stripe no está configurado (STRIPE_API_KEY): comprobante del ledger interno.</div>`);
+  const url = (mirror.find(m => m.dashboard_url) || {}).dashboard_url;
+  $("#rc-open").classList.toggle("hidden", !url);
+  if (url) $("#rc-open").href = url;
+  $("#rc-panel").classList.toggle("hidden", !stripeStatus.configured && !mirror.length);
+  $("#receipt").classList.remove("hidden");
+}
+const closeReceipt = () => $("#receipt").classList.add("hidden");
+$$("[data-rclose]").forEach(x => x.onclick = closeReceipt);
+$("#rc-panel").onclick = () => { closeReceipt(); showTab("stripe"); };
+
+// ---------------------------------------------------------------- check mailbox now
+$("#btn-pollnow").onclick = async () => {
+  const b = $("#btn-pollnow"), label = b.innerHTML;
+  b.disabled = true; b.innerHTML = `<span class="animate-pulse">📥 Revisando bandeja…</span>`;
+  try {
+    const r = await api("/api/email/poll-now", {method: "POST"});
+    const who = (m) => m.from_name || m.from_address;
+    if (r.error) toast(`❌ No se pudo leer la casilla: ${r.error}`, "bad", 9000);
+    else if (r.new.length) {
+      const names = [...new Set(r.new.map(who))].join(", ");
+      toast(`📬 ${r.new.length} email${r.new.length > 1 ? "s" : ""} encontrado${r.new.length > 1 ? "s" : ""} de ${names}: procesando…`, "ok", 7000);
+      const newest = r.new[0];
+      if (newest.ticket_id && selected !== newest.ticket_id) { showTab("detail"); selectTicket(newest.ticket_id); }
+    } else if (r.duplicates.length) {
+      toast(`📭 Sin emails nuevos · ${r.duplicates.length} ya procesado${r.duplicates.length > 1 ? "s" : ""} (${r.duplicates.map(m => m.ticket_id).join(", ")})`, "info", 7000);
+    } else {
+      toast(`📭 Bandeja revisada: no hay emails nuevos en los últimos ${r.status.lookback_minutes} min`, "info", 6000);
+    }
+    if (r.skipped.length) toast(`Ignorados ${r.skipped.length}: ${r.skipped.slice(0, 3).map(m => `${who(m)} (${m.skipped_reason})`).join(" · ")}${r.skipped.length > 3 ? " …" : ""}`, "warn", 8000);
+  } catch (e) { toast(`📥 ${e.message}`, "bad", 7000); }
+  finally { b.disabled = false; b.innerHTML = label; loadMailStatus(); }
+};
 
 // ---------------------------------------------------------------- SSE
 function connectSSE() {
@@ -1087,10 +1169,15 @@ function connectSSE() {
     if (ev.type === "autopilot_changed") { renderAutopilot(ev.payload); return; }
     if (ev.type === "email_received") {
       ticketChannels[ev.ticket_id] = "email";
-      toast(`📧 New email from ${ev.payload.from} — “${ev.payload.subject || "(no subject)"}”`, "info");
-      // Auto-follow incoming mail so the graph is visibly picked up in real time.
-      const busy = !$("#modal").classList.contains("hidden") || !$("#compose").classList.contains("hidden");
-      if (!busy && selected !== ev.ticket_id) { selectTicket(ev.ticket_id); return; }
+      toast(`📧 Email de ${ev.payload.from_name || ev.payload.from} — “${ev.payload.subject || "(sin asunto)"}”`, "info", 6000);
+      // Auto-follow incoming mail: jump to the new ticket on the Ticket tab, graph animating live.
+      const busy = !$("#modal").classList.contains("hidden") || !$("#compose").classList.contains("hidden") || !$("#mailcfg").classList.contains("hidden");
+      if (!busy && selected !== ev.ticket_id) {
+        closeReceipt();
+        showTab("detail");
+        selectTicket(ev.ticket_id).then(() => { const g = document.getElementById("graph-ticket"); if (g) g.scrollIntoView({behavior: "smooth", block: "start"}); });
+        return;
+      }
     }
     if (ev.ticket_id === selected && !seenEventIds.has(ev.id)) {
       seenEventIds.add(ev.id);
@@ -1112,7 +1199,10 @@ function connectSSE() {
       desktopAlert(ev);
       if (ev.ticket_id !== selected) toast(`⚠️ ${ev.ticket_id} requires billing supervisor approval (${money(ev.payload.amount)})`, "warn");
     }
-    if (ev.type === "run_completed" && ev.ticket_id === selected) toast(`${ev.ticket_id} → ${ev.payload.status}`, ev.payload.status === "EXECUTED" ? "ok" : "info");
+    if (ev.type === "run_completed" && ev.ticket_id === selected) {
+      toast(`${ev.ticket_id} → ${ev.payload.status}`, ev.payload.status === "EXECUTED" ? "ok" : "info");
+      if (ev.payload.status === "EXECUTED" && ticketChannels[ev.ticket_id] === "email" && $("#modal").classList.contains("hidden")) setTimeout(() => showReceipt(ev.ticket_id), 400);
+    }
   };
   ["ticket_created", "email_received", "node_started", "node_completed", "interrupt", "paused", "supervisor_alert", "decision", "run_completed", "run_error",
    "autopilot_approved", "autopilot_blocked", "autopilot_changed"]

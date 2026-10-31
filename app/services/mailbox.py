@@ -219,8 +219,8 @@ class MailboxService:
         if not check["ok"]:
             return {"saved": False, "check": check, "status": self.describe()}
         if cfg.demo_alias_email and cfg.demo_alias_customer_id:
-            if cfg.demo_alias_email == cfg.email:
-                raise ValueError("the demo sender must be a different address than the support mailbox")
+            # The alias may be the support mailbox itself (demo self-send from the phone): our own
+            # replies carry loop-protection markers, so answering ourselves never loops.
             await self.db.set_customer_alias(cfg.demo_alias_email, cfg.demo_alias_customer_id)
         saved = {
             "connected": True,

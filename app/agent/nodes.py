@@ -780,6 +780,8 @@ class SentinelNodes:
                 channel=channel,
                 inbound_source=state.get("inbound_source"),
                 in_reply_to=state.get("email_message_id"),
+                # Real SMTP only to an identity we know: the account owner or an operator-verified alias.
+                verified_recipient=customer is not None and not self._sender_mismatch(state, customer),
             )
             await self.d.crm.add_note(
                 customer_id=customer.id if customer else None,

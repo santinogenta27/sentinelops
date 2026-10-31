@@ -271,13 +271,14 @@ async def email_status(rt: RuntimeDep, listener: ListenerDep) -> dict[str, objec
     }
 
 
+@app.post("/api/email/poll-now")
 @app.post("/api/email/poll")
 async def email_poll_now(listener: ListenerDep) -> dict[str, object]:
-    """Trigger one IMAP poll immediately (useful in demos instead of waiting for the interval)."""
-    if not listener.status.enabled:
-        raise HTTPException(409, "IMAP listener disabled (set ENABLE_EMAIL_LISTENER=true)")
-    created = await listener.poll_once()
-    return {"created": created, "status": listener.describe()}
+    """Check the mailbox right now (instead of waiting for the interval) and report what was found."""
+    if not (listener.settings.enable_email_listener and listener.settings.imap_user):
+        raise HTTPException(409, "No hay casilla conectada: configurala con ⚙️ Conectar Casilla de Correo")
+    report = await listener.poll()
+    return {**report.as_dict(), "created": len(report.new), "status": listener.describe()}
 
 
 @app.get("/api/inbox")

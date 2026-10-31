@@ -33,6 +33,7 @@ from app.config import Settings
 from app.db.database import utcnow
 from app.db.repository import Repository
 from app.integrations.crm_mock import CRMMock
+from app.integrations.mailer import Mailer
 from app.integrations.faults import FaultInjector, ToolError
 from app.integrations.stripe_mock import StripeMock
 from app.llm.base import LLMClient, LLMError, LLMTask
@@ -71,6 +72,7 @@ class AgentDeps:
     retriever: PolicyRetriever
     stripe: StripeMock
     crm: CRMMock
+    mailer: Mailer
     faults: FaultInjector
     llm: LLMClient | None
     clock: Callable[[], datetime] = field(default=utcnow)
@@ -105,6 +107,12 @@ class SentinelNodes:
     def _customer(state: AgentState) -> CustomerRecord | None:
         profile = state.get("customer_profile")
         return CustomerRecord.model_validate(profile) if profile else None
+
+    @staticmethod
+    def _sender_mismatch(state: AgentState, customer: CustomerRecord | None) -> bool:
+        """Email channel: the request came from an address that does not own the account."""
+        sender = state.get("sender_email")
+        return bool(sender and customer is not None and customer.email != sender)
 
     @staticmethod
     def _transactions(state: AgentState) -> list[TransactionRecord]:
@@ -332,6 +340,9 @@ class SentinelNodes:
             }
 
         action = plan.action
+        sender_mismatch = self._sender_mismatch(state, customer)
+        if sender_mismatch and "POL-ID-001" not in action.policy_refs:
+            action = action.model_copy(update={"policy_refs": [*action.policy_refs, "POL-ID-001"]})
         risk = assess_risk(
             customer=customer,
             findings=inv.findings,
@@ -340,6 +351,7 @@ class SentinelNodes:
             payout_total=action.total_amount,
             hitl_threshold=s.hitl_threshold_usd,
             now=now,
+            sender_mismatch=sender_mismatch,
         )
         needs_human = requires_human_approval(
             action, risk, injection_detected=injection, hitl_threshold=s.hitl_threshold_usd
@@ -554,7 +566,8 @@ class SentinelNodes:
         ]
         return {
             "ticket_reference": state["ticket_id"],
-            "customer_name": customer.name if customer else None,
+            # Never reveal the account holder's name to an unverified sender (POL-ID-001).
+            "customer_name": customer.name if customer and not self._sender_mismatch(state, customer) else None,
             "outcome": action.action_type,
             "human_rejected": state.get("human_approved") is False,
             "execution_failed": bool(receipt and not receipt.executed and action.action_type == "REFUND"),
@@ -686,11 +699,29 @@ class SentinelNodes:
             final = "EXECUTED"
 
         logs: list[str] = []
-        sent = False
+        delivery = "not sent"
         customer = self._customer(state)
-        to_addr = customer.email if customer else state.get("customer_email")
+        channel = state.get("channel") or "web"
+        original_subject = state.get("email_subject")
+        if channel == "email" and state.get("sender_email"):
+            # Reply in the customer's own email thread.
+            to_addr = state.get("sender_email")
+            base = original_subject or "Your billing request"
+            mail_subject = base if base.lower().startswith("re:") else f"Re: {base}"
+        else:
+            to_addr = customer.email if customer else state.get("customer_email")
+            mail_subject = subject
         try:
-            sent = await self.d.crm.send_email(ticket_id=state["ticket_id"], to_address=to_addr, subject=subject, body=body)
+            delivery = await self.d.mailer.send_customer_reply(
+                ticket_id=state["ticket_id"],
+                to_address=to_addr,
+                subject=mail_subject,
+                heading=subject,
+                body=body,
+                channel=channel,
+                inbound_source=state.get("inbound_source"),
+                in_reply_to=state.get("email_message_id"),
+            )
             await self.d.crm.add_note(
                 customer_id=customer.id if customer else None,
                 ticket_id=state["ticket_id"],
@@ -698,5 +729,11 @@ class SentinelNodes:
             )
         except ToolError as exc:
             logs.append(_log(node, f"email/CRM dispatch failed: {exc}"))
-        logs.append(_log(node, f"email {'sent' if sent else 'already sent (idempotent)'} to {to_addr} → status {final}"))
+        how = {
+            "smtp": "delivered via SMTP",
+            "outbox": "queued in outbox (simulated delivery)",
+            "duplicate": "already sent (idempotent)",
+            "smtp_failed": "SMTP delivery failed — kept in outbox for retry",
+        }.get(delivery, delivery)
+        logs.append(_log(node, f"email to {to_addr} {how} → status {final}"))
         return {"email_dispatched": True, "execution_status": final, "logs": logs}

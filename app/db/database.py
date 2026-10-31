@@ -95,7 +95,41 @@ CREATE TABLE IF NOT EXISTS ticket_events (
     payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_events_ticket ON ticket_events(ticket_id, id);
+
+CREATE TABLE IF NOT EXISTS inbound_emails (
+    message_id TEXT PRIMARY KEY,
+    ticket_id TEXT NOT NULL,
+    from_address TEXT NOT NULL,
+    from_name TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL,
+    source TEXT NOT NULL,
+    received_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS supervisor_alerts (
+    ticket_id TEXT PRIMARY KEY,
+    recipient TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body_html TEXT NOT NULL,
+    amount REAL NOT NULL,
+    risk_level TEXT,
+    channel TEXT NOT NULL,
+    delivery TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
+
+# Additive, idempotent column migrations for databases created by earlier versions.
+COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
+    "tickets": {"channel": "TEXT NOT NULL DEFAULT 'web'", "subject": "TEXT"},
+    "email_outbox": {
+        "body_html": "TEXT",
+        "delivery": "TEXT NOT NULL DEFAULT 'outbox'",
+        "channel": "TEXT NOT NULL DEFAULT 'web'",
+        "in_reply_to": "TEXT",
+    },
+}
 
 
 def utcnow() -> datetime:
@@ -126,6 +160,12 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         async with self.connect() as conn:
             await conn.executescript(SCHEMA)
+            for table, columns in COLUMN_MIGRATIONS.items():
+                cur = await conn.execute(f"PRAGMA table_info({table})")
+                existing = {row["name"] for row in await cur.fetchall()}
+                for column, ddl in columns.items():
+                    if column not in existing:
+                        await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
             await conn.commit()
 
     # --- tickets ------------------------------------------------------------
@@ -136,28 +176,35 @@ class Database:
         customer_email: str | None,
         execution_status: str,
         summary: dict[str, object] | None = None,
+        *,
+        channel: str | None = None,
+        subject: str | None = None,
     ) -> None:
         now = iso(utcnow())
         async with self.connect() as conn:
             await conn.execute(
                 """
-                INSERT INTO tickets (id, raw_message, customer_email, execution_status, summary_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tickets (id, raw_message, customer_email, execution_status, summary_json, created_at, updated_at,
+                                     channel, subject)
+                VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'web'), ?)
                 ON CONFLICT(id) DO UPDATE SET
                     customer_email = COALESCE(excluded.customer_email, tickets.customer_email),
                     execution_status = excluded.execution_status,
                     summary_json = excluded.summary_json,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    channel = COALESCE(?, tickets.channel),
+                    subject = COALESCE(excluded.subject, tickets.subject)
                 """,
-                (ticket_id, raw_message, customer_email, execution_status, json.dumps(summary or {}), now, now),
+                (ticket_id, raw_message, customer_email, execution_status, json.dumps(summary or {}), now, now,
+                 channel, subject, channel),
             )
             await conn.commit()
 
     async def list_tickets(self, limit: int = 100) -> list[dict[str, object]]:
         async with self.connect() as conn:
             cur = await conn.execute(
-                "SELECT id, raw_message, customer_email, execution_status, summary_json, created_at, updated_at "
-                "FROM tickets ORDER BY created_at DESC LIMIT ?",
+                "SELECT id, raw_message, customer_email, execution_status, summary_json, created_at, updated_at, "
+                "channel, subject FROM tickets ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             )
             rows = await cur.fetchall()
@@ -172,10 +219,50 @@ class Database:
                     "execution_status": r["execution_status"],
                     "created_at": r["created_at"],
                     "updated_at": r["updated_at"],
+                    "channel": r["channel"],
+                    "subject": r["subject"],
                     **summary,
                 }
             )
         return out
+
+    # --- inbound email ------------------------------------------------------
+    async def record_inbound_email(
+        self,
+        *,
+        message_id: str,
+        ticket_id: str,
+        from_address: str,
+        from_name: str,
+        subject: str,
+        body: str,
+        source: str,
+    ) -> str | None:
+        """Insert idempotently. Returns the *existing* ticket id if this Message-Id was already ingested."""
+        async with self.connect() as conn:
+            cur = await conn.execute(
+                "INSERT OR IGNORE INTO inbound_emails (message_id, ticket_id, from_address, from_name, subject, body, source, received_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (message_id, ticket_id, from_address, from_name, subject, body, source, iso(utcnow())),
+            )
+            await conn.commit()
+            if (cur.rowcount or 0) > 0:
+                return None
+            cur = await conn.execute("SELECT ticket_id FROM inbound_emails WHERE message_id = ?", (message_id,))
+            row = await cur.fetchone()
+        return str(row["ticket_id"]) if row else None
+
+    async def list_inbound_emails(self, limit: int = 100) -> list[dict[str, object]]:
+        async with self.connect() as conn:
+            cur = await conn.execute("SELECT * FROM inbound_emails ORDER BY received_at DESC LIMIT ?", (limit,))
+            rows = await cur.fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+    async def list_supervisor_alerts(self, limit: int = 100) -> list[dict[str, object]]:
+        async with self.connect() as conn:
+            cur = await conn.execute("SELECT * FROM supervisor_alerts ORDER BY created_at DESC LIMIT ?", (limit,))
+            rows = await cur.fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
 
     async def get_ticket_row(self, ticket_id: str) -> dict[str, object] | None:
         async with self.connect() as conn:

@@ -25,11 +25,12 @@ from app.db.database import Database, iso, utcnow
 from app.db.repository import Repository
 from app.db.seed import seed_database
 from app.integrations.crm_mock import CRMMock
+from app.integrations.mailer import Mailer, Transport
 from app.integrations.faults import FaultInjector, fault_injector
 from app.integrations.stripe_mock import StripeMock
 from app.llm.base import LLMClient
 from app.llm.factory import build_llm
-from app.models.schemas import TERMINAL_STATUSES, HumanDecision, TicketView
+from app.models.schemas import TERMINAL_STATUSES, ChannelMeta, HumanDecision, TicketView
 from app.models.state import AgentState, initial_state
 from app.rag.embeddings import Embedder, GeminiEmbedder, HashingEmbedder
 from app.rag.retriever import PolicyRetriever, load_policies
@@ -124,6 +125,7 @@ class SentinelRuntime:
         llm: LLMClient | None | str = "auto",
         faults: FaultInjector | None = None,
         persist_vectors: bool = True,
+        mail_transport: Transport | None = None,
     ) -> SentinelRuntime:
         db = Database(settings.business_db_path)
         await db.init_schema()
@@ -147,6 +149,7 @@ class SentinelRuntime:
             retriever=retriever,
             stripe=StripeMock(db, injector),
             crm=CRMMock(db, injector),
+            mailer=Mailer(db, injector, settings, transport=mail_transport),
             faults=injector,
             llm=llm_client,
         )
@@ -184,7 +187,7 @@ class SentinelRuntime:
     def _lock(self, ticket_id: str) -> asyncio.Lock:
         return self._locks.setdefault(ticket_id, asyncio.Lock())
 
-    async def _emit(self, ticket_id: str, type_: str, node: str | None, payload: dict[str, object]) -> None:
+    async def emit(self, ticket_id: str, type_: str, node: str | None, payload: dict[str, object]) -> None:
         event_id = await self.db.append_event(ticket_id, type_, node, payload)
         self.bus.publish({"id": event_id, "ticket_id": ticket_id, "type": type_, "node": node, "ts": iso(utcnow()), "payload": payload})
 
@@ -193,19 +196,19 @@ class SentinelRuntime:
         try:
             async for mode, chunk in self.graph.astream(graph_input, config, stream_mode=STREAM_MODES):
                 if mode == "tasks" and isinstance(chunk, dict) and "input" in chunk:
-                    await self._emit(ticket_id, "node_started", str(chunk.get("name")), {})
+                    await self.emit(ticket_id, "node_started", str(chunk.get("name")), {})
                 elif mode == "updates" and isinstance(chunk, dict):
                     for node, delta in chunk.items():
                         if node == "__interrupt__":
                             interrupts = delta if isinstance(delta, (list, tuple)) else [delta]
                             for itr in interrupts:
                                 value = getattr(itr, "value", itr)
-                                await self._emit(ticket_id, "interrupt", "human_gate", {"request": value})
+                                await self.emit(ticket_id, "interrupt", "human_gate", {"request": value})
                         else:
-                            await self._emit(ticket_id, "node_completed", node, {"delta": delta or {}})
+                            await self.emit(ticket_id, "node_completed", node, {"delta": delta or {}})
         except Exception as exc:  # noqa: BLE001 - surface any graph failure to the operator
             logger.exception("graph run failed for %s", ticket_id)
-            await self._emit(ticket_id, "run_error", None, {"error": f"{type(exc).__name__}: {exc}"})
+            await self.emit(ticket_id, "run_error", None, {"error": f"{type(exc).__name__}: {exc}"})
             snap = await self.graph.aget_state(config)
             values = dict(snap.values)
             await self.db.upsert_ticket(ticket_id, values.get("raw_message", ""), values.get("customer_email"), "FAILED", _summarise(values))
@@ -216,26 +219,96 @@ class SentinelRuntime:
         status = str(values.get("execution_status", "FAILED"))
         await self.db.upsert_ticket(ticket_id, values["raw_message"], values.get("customer_email"), status, _summarise(values))
         if snap.next:
-            await self._emit(ticket_id, "paused", None, {"next": list(snap.next), "status": status})
+            await self.emit(ticket_id, "paused", None, {"next": list(snap.next), "status": status})
+            if tuple(snap.next) == ("human_gate",):
+                await self._alert_supervisor(ticket_id, values)
         else:
-            await self._emit(ticket_id, "run_completed", None, {"status": status})
+            await self.emit(ticket_id, "run_completed", None, {"status": status})
         return values
 
-    async def run_ticket(self, raw_message: str, customer_email: str | None = None, ticket_id: str | None = None) -> tuple[str, dict[str, Any]]:
+    async def _alert_supervisor(self, ticket_id: str, values: dict[str, Any]) -> None:
+        """HITL notification: persist/email the alert and push a high-priority SSE event to the cockpit."""
+        action = values.get("resolution_action") or {}
+        risk = values.get("risk") or {}
+        amount = round(sum(float(r.get("amount", 0)) for r in action.get("refunds") or []), 2)
+        channel = str(values.get("channel") or "web")
+        try:
+            created = await self.deps.mailer.send_supervisor_alert(
+                ticket_id=ticket_id,
+                amount=amount,
+                currency=str(action.get("currency", "USD")),
+                action_type=str(action.get("action_type", "REFUND")),
+                risk_level=str(risk.get("level", "UNKNOWN")),
+                risk_flags=[str(f) for f in risk.get("flags", [])],
+                channel=channel,
+                sender=values.get("sender_email"),
+                subject=values.get("email_subject"),
+                summary=str(values.get("investigation_summary", "")),
+            )
+        except Exception:  # noqa: BLE001 - alerting must never break the run
+            logger.exception("supervisor alert failed for %s", ticket_id)
+            created = True
+        if created:
+            await self.emit(
+                ticket_id,
+                "supervisor_alert",
+                "human_gate",
+                {
+                    "amount": amount,
+                    "currency": action.get("currency", "USD"),
+                    "risk_level": risk.get("level"),
+                    "channel": channel,
+                    "sender": values.get("sender_email") or values.get("customer_email"),
+                    "subject": values.get("email_subject"),
+                    "recipient": self.settings.supervisor_email,
+                },
+            )
+
+    async def run_ticket(
+        self,
+        raw_message: str,
+        customer_email: str | None = None,
+        ticket_id: str | None = None,
+        *,
+        meta: ChannelMeta | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         """Run a ticket until completion or the HITL interrupt (awaitable; used by tests and eval)."""
         tid = ticket_id or new_ticket_id()
-        await self.db.upsert_ticket(tid, raw_message, customer_email, "TRIAGING")
-        await self._emit(tid, "ticket_created", None, {"raw_message": raw_message, "customer_email": customer_email})
+        m = meta or ChannelMeta()
+        await self.db.upsert_ticket(tid, raw_message, customer_email, "TRIAGING", channel=m.channel, subject=m.subject)
+        await self.emit(
+            tid,
+            "ticket_created",
+            None,
+            {"raw_message": raw_message, "customer_email": customer_email, "channel": m.channel, "subject": m.subject},
+        )
+        state = initial_state(
+            tid,
+            raw_message,
+            customer_email,
+            channel=m.channel,
+            inbound_source=m.inbound_source,
+            sender_email=m.sender_email,
+            email_subject=m.subject,
+            email_message_id=m.message_id,
+        )
         async with self._lock(tid):
-            values = await self._drive(tid, initial_state(tid, raw_message, customer_email))
+            values = await self._drive(tid, state)
         return tid, values
 
-    def submit(self, raw_message: str, customer_email: str | None = None) -> str:
+    def submit(
+        self,
+        raw_message: str,
+        customer_email: str | None = None,
+        *,
+        ticket_id: str | None = None,
+        meta: ChannelMeta | None = None,
+    ) -> str:
         """Fire-and-forget submission (API). Progress is observable via SSE."""
-        tid = new_ticket_id()
+        tid = ticket_id or new_ticket_id()
 
         async def _job() -> None:
-            await self.run_ticket(raw_message, customer_email, ticket_id=tid)
+            await self.run_ticket(raw_message, customer_email, ticket_id=tid, meta=meta)
 
         task = asyncio.create_task(_job(), name=f"ticket-{tid}")
         self._tasks.add(task)
@@ -249,7 +322,7 @@ class SentinelRuntime:
                 raise TicketNotFoundError(ticket_id)
             if tuple(snap.next) != ("human_gate",):
                 raise InvalidTransitionError(f"ticket {ticket_id} is not awaiting approval (next={list(snap.next)})")
-            await self._emit(ticket_id, "decision", "human_gate", decision.model_dump(mode="json"))
+            await self.emit(ticket_id, "decision", "human_gate", decision.model_dump(mode="json"))
             return await self._drive(ticket_id, Command(resume=decision.model_dump(mode="json")))
 
     def resume_in_background(self, ticket_id: str, decision: HumanDecision) -> None:

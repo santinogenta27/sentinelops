@@ -48,9 +48,31 @@ class AgentState(TypedDict):
     draft_attempts: int
     email_dispatched: bool
 
+    # --- Channel context (inbound email) -----------------------------------
+    channel: str  # "web" | "email"
+    inbound_source: Optional[str]  # "webhook" | "imap" | "simulator"
+    sender_email: Optional[str]  # address the request actually came from
+    email_subject: Optional[str]
+    email_message_id: Optional[str]
 
-def initial_state(ticket_id: str, raw_message: str, customer_email: Optional[str] = None) -> AgentState:
+
+def initial_state(
+    ticket_id: str,
+    raw_message: str,
+    customer_email: Optional[str] = None,
+    *,
+    channel: str = "web",
+    inbound_source: Optional[str] = None,
+    sender_email: Optional[str] = None,
+    email_subject: Optional[str] = None,
+    email_message_id: Optional[str] = None,
+) -> AgentState:
     return AgentState(
+        channel=channel,
+        inbound_source=inbound_source,
+        sender_email=sender_email,
+        email_subject=email_subject,
+        email_message_id=email_message_id,
         ticket_id=ticket_id,
         raw_message=raw_message,
         customer_email=customer_email,

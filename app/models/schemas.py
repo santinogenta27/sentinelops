@@ -298,6 +298,16 @@ class TicketCreate(StrictModel):
         return normalise_email(v)
 
 
+class ChannelMeta(StrictModel):
+    """Where a ticket came from. Email tickets are answered in the sender's thread."""
+
+    channel: Literal["web", "email"] = "web"
+    inbound_source: Literal["webhook", "imap", "simulator"] | None = None
+    sender_email: str | None = None
+    subject: Annotated[str, StringConstraints(max_length=500)] | None = None
+    message_id: Annotated[str, StringConstraints(max_length=500)] | None = None
+
+
 class TicketCreated(StrictModel):
     ticket_id: TicketId
     execution_status: ExecutionStatus
@@ -335,6 +345,11 @@ class TicketView(BaseModel):
     injection_signals: list[str] = Field(default_factory=list)
     tool_calls: list[dict[str, object]] = Field(default_factory=list)
     logs: list[str] = Field(default_factory=list)
+    email_dispatched: bool = False
+    channel: str = "web"
+    inbound_source: str | None = None
+    sender_email: str | None = None
+    email_subject: str | None = None
     next_nodes: list[str] = Field(default_factory=list)
     pending_interrupt: dict[str, object] | None = None
     created_at: str | None = None

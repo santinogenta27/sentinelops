@@ -24,7 +24,7 @@ cd C:\Users\usuario\sentinelops
 
 uvicorn app.main:app --reload --port 8000     # cockpit en http://127.0.0.1:8000
 pytest tests/eval_suite.py -v                  # suite de evaluación (gate de CI)
-pytest                                         # todo: unit + integración + API + eval (79 tests)
+pytest                                         # todo: unit + integración + API + email + eval (101 tests)
 mypy                                           # tipado estricto (--strict)
 ```
 
@@ -90,6 +90,36 @@ En bash: `export GEMINI_API_KEY=...`; en PowerShell: `$env:GEMINI_API_KEY="..."`
 - **Anti-alucinación en triage:** email/monto/referencias extraídos por el LLM se descartan si no aparecen
   literalmente en el mensaje.
 
+## 📧 Canal de email real (inbound mailbox + worker)
+
+Los clientes pueden escribir por email y el agente resuelve y contesta en el mismo hilo.
+
+```
+Gmail / Outlook ──IMAP──► EmailListener ─┐
+Mailgun / SendGrid / Postmark ─webhook──►├─► InboundEmailService ─► LangGraph ─► respuesta HTML "Re: <asunto>"
+Cockpit "📧 Send Live Test Email" ───────┘   (dedupe Message-Id,      │            (outbox + SMTP opcional)
+                                              identidad del remitente) └─ HumanGate ─► ⚠️ alerta al supervisor
+```
+
+| Pieza | Dónde | Detalles |
+|---|---|---|
+| Webhook | `POST /api/webhooks/inbound-email` | JSON o form-encoded. Acepta `from/subject/body_plain/message_id` y los alias de Mailgun (`sender`, `body-plain`, `Message-Id`), SendGrid (`text`) y Postmark (`From`, `TextBody`, `MessageID`). Con `INBOUND_WEBHOOK_SECRET` exige el header `X-Webhook-Token`. |
+| Listener IMAP | `app/integrations/imap_listener.py` | `ENABLE_EMAIL_LISTENER=true`. Lee correos UNSEEN de la carpeta o etiqueta configurada, filtra por palabras clave del asunto, ignora auto-respuestas y rebotes, y marca `\Seen` **después** de crear el ticket. Si falla, aplica backoff exponencial. `POST /api/email/poll` fuerza una lectura inmediata. |
+| Simulador | botón **📧 Send Live Test Email** | Ventana tipo Gmail con plantillas. Usa el mismo pipeline (`POST /api/email/simulate`) y el grafo arranca solo vía SSE. |
+| Respuesta | pestaña **Ledger / Outbox** | Vista previa del email HTML renderizado (iframe con sandbox), con asunto `Re: …` e `In-Reply-To`. |
+| Supervisor | banner **⚠️ New Email requires billing supervisor approval** | Se dispara al entrar en `HumanGate`. También guarda (y opcionalmente envía) un email de alerta y actualiza el título de la pestaña. Si el navegador lo permite, muestra una notificación de escritorio. |
+
+**Garantías de seguridad**
+- **Idempotencia:** el mismo `Message-Id` (reintentos del proveedor, re-lecturas IMAP) produce un solo ticket.
+- **Identidad:** si el remitente es dueño de la cuenta, esa es la identidad autenticada. Si escribe desde otra dirección (por ejemplo, un email personal que menciona `alice@acme-corp.com`), el riesgo sube a ALTO (`sender_not_account_owner`). En ese caso cualquier pago requiere aprobación humana y la respuesta no revela el nombre del titular (POL-ID-001).
+- **Envío SMTP real solo para correo real:** las simulaciones del cockpit nunca salen por SMTP, así el demo no puede escribirle a dominios reales.
+- **Sin loops de correo:** se ignoran mensajes de la propia dirección de soporte y las auto-respuestas.
+
+**Probar con Gmail real:** activá 2FA, creá una *App Password* y poné en `.env`:
+`ENABLE_EMAIL_LISTENER=true`, `IMAP_USER=tu@gmail.com`, `IMAP_PASSWORD=<app password>` y, para contestar,
+`ENABLE_EMAIL_SENDER=true`. Mandate un mail con asunto "Refund request" desde una cuenta de cliente del seed
+(o mencionando una en el cuerpo) y mirá cómo el cockpit lo levanta solo.
+
 ## API
 
 | Método | Ruta | Descripción |
@@ -101,6 +131,8 @@ En bash: `export GEMINI_API_KEY=...`; en PowerShell: `$env:GEMINI_API_KEY="..."`
 | `GET` | `/api/stream` | Server-Sent Events (`node_started`, `node_completed`, `interrupt`, `decision`, `run_completed`, …) |
 | `GET` | `/api/ledger` · `/api/graph` · `/api/health` · `/api/eval/report` | Reembolsos/outbox · topología · estado LLM · último reporte de eval |
 | `POST` | `/api/admin/faults` · `/api/admin/reset` | Inyección de fallos (chaos) · re-seed del ledger |
+| `POST` | `/api/webhooks/inbound-email` · `/api/email/simulate` | Email entrante (proveedor, con token) · simulador del cockpit |
+| `GET`/`POST` | `/api/email/status` · `/api/inbox` · `/api/email/poll` | Estado del canal · emails recibidos · lectura IMAP inmediata |
 
 Docs interactivas OpenAPI: `http://127.0.0.1:8000/docs`.
 

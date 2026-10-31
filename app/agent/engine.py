@@ -181,9 +181,14 @@ def assess_risk(
     payout_total: float,
     hitl_threshold: float,
     now: datetime,
+    sender_mismatch: bool = False,
 ) -> RiskAssessment:
     score = 0.0
     flags: list[str] = []
+    if sender_mismatch:
+        # Request came from an address that does not own the account (POL-ID-001): identity unverified.
+        score += 0.6
+        flags.append("sender_not_account_owner")
     kinds = {f.kind for f in findings}
     if category == "FRAUD_CLAIM":
         score += 0.6

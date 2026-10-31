@@ -1,4 +1,4 @@
-"""Mock CRM webhook + transactional email outbox."""
+"""Mock CRM webhook (case notes). Outbound email lives in :mod:`app.integrations.mailer`."""
 
 from __future__ import annotations
 
@@ -19,14 +19,3 @@ class CRMMock:
                 (customer_id, ticket_id, note[:2000], iso(utcnow())),
             )
             await conn.commit()
-
-    async def send_email(self, *, ticket_id: str, to_address: str | None, subject: str, body: str) -> bool:
-        """Idempotent per ticket: a resumed/replayed graph never emails the customer twice."""
-        self.faults.check("email.send")
-        async with self.db.connect() as conn:
-            cur = await conn.execute(
-                "INSERT OR IGNORE INTO email_outbox (ticket_id, to_address, subject, body, created_at) VALUES (?, ?, ?, ?, ?)",
-                (ticket_id, to_address, subject, body, iso(utcnow())),
-            )
-            await conn.commit()
-            return (cur.rowcount or 0) > 0

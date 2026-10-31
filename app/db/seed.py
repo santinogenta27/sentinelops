@@ -87,7 +87,10 @@ async def seed_database(db: Database, *, force: bool = False, now: datetime | No
         if count and not force:
             return False
         if force:
-            for table in ("refunds", "card_freezes", "crm_notes", "email_outbox", "ticket_events", "tickets", "transactions", "customers"):
+            for table in (
+                "refunds", "card_freezes", "crm_notes", "email_outbox", "supervisor_alerts", "inbound_emails",
+                "ticket_events", "tickets", "transactions", "customers",
+            ):
                 await conn.execute(f"DELETE FROM {table}")  # noqa: S608 - static table names
         await conn.executemany(
             "INSERT INTO customers (id, email, name, tier, country, account_created_at, chargeback_count, account_status) "

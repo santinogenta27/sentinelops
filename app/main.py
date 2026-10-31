@@ -25,7 +25,9 @@ from app.integrations.email_inbound import InboundEmailPayload, from_webhook_pay
 from app.integrations.imap_listener import EmailListener
 from app.models.schemas import DecisionRequest, HumanDecision, TicketCreate, TicketCreated, TicketView
 from app.scenarios import SCENARIOS
+from app.services.controls import AutopilotState, AutopilotUpdate
 from app.services.inbound_email import InboundEmailService
+from app.services.mailbox import MailboxConfigIn, MailboxService
 from app.services.runtime import InvalidTransitionError, SentinelRuntime, TicketNotFoundError
 
 for _stream in (sys.stdout, sys.stderr):  # Windows consoles default to cp1252
@@ -45,9 +47,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     runtime = await SentinelRuntime.create(settings)
     inbound = InboundEmailService(runtime)
     listener = EmailListener(settings, inbound.ingest)
+    mailbox = MailboxService(runtime.db, settings, listener)
+    if await mailbox.load_and_apply():
+        logger.info("mailbox connected from the cockpit restored: %s", settings.imap_user)
     app.state.runtime = runtime
     app.state.inbound = inbound
     app.state.listener = listener
+    app.state.mailbox = mailbox
     if settings.enable_email_listener:
         listener.start()
         logger.info("IMAP listener started (%s, folder=%s)", settings.imap_host, settings.imap_folder)
@@ -86,7 +92,13 @@ def get_listener(request: Request) -> EmailListener:
     return listener
 
 
+def get_mailbox(request: Request) -> MailboxService:
+    service: MailboxService = request.app.state.mailbox
+    return service
+
+
 InboundDep = Annotated[InboundEmailService, Depends(get_inbound)]
+MailboxDep = Annotated[MailboxService, Depends(get_mailbox)]
 ListenerDep = Annotated[EmailListener, Depends(get_listener)]
 
 
@@ -120,7 +132,68 @@ async def health(rt: RuntimeDep) -> dict[str, object]:
             "sender_enabled": rt.deps.mailer.real_delivery_enabled,
             "support_address": s.support_email_address,
         },
+        "autopilot": rt.controls.autopilot.model_dump(),
+        "stripe": rt.deps.stripe_live.describe() if rt.deps.stripe_live else {"configured": False, "mode": "disabled"},
     }
+
+
+# -------------------------------------------------------------------- auto-pilot
+@app.get("/api/autopilot", response_model=AutopilotState)
+async def get_autopilot(rt: RuntimeDep) -> AutopilotState:
+    return rt.controls.autopilot
+
+
+@app.put("/api/autopilot", response_model=AutopilotState)
+async def set_autopilot(body: AutopilotUpdate, rt: RuntimeDep) -> AutopilotState:
+    state = await rt.controls.update_autopilot(body)
+    logger.info("auto-pilot %s (ceiling $%.2f)", "ON" if state.enabled else "OFF", state.max_usd)
+    rt.bus.publish({"id": None, "ticket_id": None, "type": "autopilot_changed", "node": None, "payload": state.model_dump()})
+    return state
+
+
+# ------------------------------------------------------------------------ stripe
+@app.get("/api/stripe/dashboard-sync")
+async def stripe_dashboard_sync(
+    rt: RuntimeDep, limit: Annotated[int, Query(ge=1, le=100)] = 15
+) -> dict[str, object]:
+    """Real-time Stripe view: balance, latest charges and refunds (stripe-python, STRIPE_API_KEY)."""
+    live = rt.deps.stripe_live
+    if live is None:
+        return {"configured": False, "mode": "disabled", "error": None}
+    return await live.dashboard(limit)
+
+
+# -------------------------------------------------------------- mailbox settings
+@app.get("/api/email/config")
+async def email_config(mailbox: MailboxDep) -> dict[str, object]:
+    return mailbox.describe()
+
+
+@app.post("/api/email/test-connection")
+async def email_test_connection(body: MailboxConfigIn, mailbox: MailboxDep) -> dict[str, object]:
+    """Log in to the real IMAP (and SMTP) server with the given credentials. Nothing is saved."""
+    try:
+        return await mailbox.test(body)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(504, "mail server did not answer in time") from exc
+
+
+@app.post("/api/email/save-config")
+async def email_save_config(body: MailboxConfigIn, mailbox: MailboxDep) -> dict[str, object]:
+    """Validate, persist and apply the mailbox live; (re)starts the IMAP listener without a restart."""
+    try:
+        return await mailbox.save(body)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(504, "mail server did not answer in time") from exc
+
+
+@app.post("/api/email/disconnect")
+async def email_disconnect(mailbox: MailboxDep) -> dict[str, object]:
+    return await mailbox.disconnect()
 
 
 # ------------------------------------------------------------------ email channel

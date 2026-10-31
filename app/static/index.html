@@ -44,6 +44,27 @@
   .chip:hover { border-color:#6366f1; color:#4338ca; }
   @keyframes glow { 0%,100% { box-shadow:0 0 0 0 rgba(245,158,11,.0); } 50% { box-shadow:0 0 22px 2px rgba(245,158,11,.45); } }
   .alert-glow { animation: glow 1.6s ease-in-out infinite; }
+  /* auto-pilot switch */
+  .switch { position:relative; width:38px; height:21px; border-radius:999px; background:#334155; transition:background .2s; flex-shrink:0; }
+  .switch::after { content:""; position:absolute; top:3px; left:3px; width:15px; height:15px; border-radius:50%; background:#fff; transition:transform .2s; }
+  .switch.on { background:#10b981; } .switch.on::after { transform:translateX(17px); }
+  @keyframes blink { 0%,100% { opacity:1; box-shadow:0 0 0 0 rgba(16,185,129,.7);} 50% { opacity:.55; box-shadow:0 0 0 5px rgba(16,185,129,0);} }
+  .live-dot { width:8px; height:8px; border-radius:50%; background:#10b981; animation: blink 1.4s infinite; display:inline-block; }
+  /* stripe-like embedded dashboard (light, like the real one) */
+  .stripe { background:#f6f9fc; color:#1a1f36; border-radius:12px; padding:14px; font-family: -apple-system, "Segoe UI", Inter, sans-serif; }
+  .stripe .card { background:#fff; border-radius:8px; box-shadow:0 0 0 1px rgba(60,66,87,.08), 0 2px 5px rgba(60,66,87,.08); }
+  .stripe .lbl { color:#697386; font-size:12px; font-weight:500; }
+  .stripe table th { color:#697386; font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.03em; }
+  .stripe table td { border-top:1px solid #e3e8ee; }
+  .stripe .badge-ok { background:#d7f7c2; color:#05690d; border-radius:4px; padding:1px 6px; font-size:11px; font-weight:600; }
+  .stripe .badge-pend { background:#fcedb9; color:#a04100; border-radius:4px; padding:1px 6px; font-size:11px; font-weight:600; }
+  .stripe .badge-bad { background:#ffe7f2; color:#b3093c; border-radius:4px; padding:1px 6px; font-size:11px; font-weight:600; }
+  .stripe .btn { background:#635bff; color:#fff; border-radius:6px; padding:6px 10px; font-size:12px; font-weight:600; }
+  .stripe .btn:hover { background:#5851ea; }
+  .stripe .lnk { color:#635bff; font-weight:600; }
+  @keyframes rowflash { from { background:#e6e3ff; } to { background:transparent; } }
+  .stripe tr.flash td { animation: rowflash 2.6s ease-out; }
+  .seg button.on { background:#4f46e5; color:#fff; border-color:#6366f1; }
   iframe.mailpreview { width:100%; height:440px; border:1px solid #1f2937; border-radius:10px; background:#f4f5f7; }
 </style>
 </head>
@@ -61,8 +82,14 @@
     <div class="flex-1"></div>
     <div id="hdr-llm" class="pill bg-slate-800 text-slate-300"><i data-lucide="cpu" class="w-3 h-3"></i>LLM …</div>
     <div id="hdr-rules" class="pill bg-slate-800 text-slate-300"></div>
-    <div id="hdr-mail" class="pill bg-slate-800 text-slate-300" title="Email channel"><i data-lucide="mail" class="w-3 h-3"></i>email</div>
+    <button id="hdr-mail" class="pill bg-slate-800 text-slate-300 cursor-pointer hover:bg-slate-700" title="Email channel — click to configure">⚪ Correo no conectado (Click para configurar)</button>
+    <button id="btn-autopilot" class="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:border-emerald-500/60 text-xs font-semibold" role="switch" aria-checked="false" title="Auto-Pilot: zero-touch approval of policy-compliant payouts">
+      <span>⚡ Auto-Pilot:</span><span id="ap-label">…</span><span id="ap-switch" class="switch"></span>
+    </button>
     <div id="hdr-sse" class="pill bg-slate-800 text-slate-300"><span class="w-2 h-2 rounded-full bg-slate-500"></span>stream</div>
+    <button id="btn-mailcfg" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow">
+      ⚙️ Conectar Casilla de Correo
+    </button>
     <button id="btn-compose" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shadow">
       <i data-lucide="send" class="w-3.5 h-3.5"></i>📧 Send Live Test Email
     </button>
@@ -143,12 +170,14 @@
         <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="timeline">Timeline</button>
         <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="tools">Tool calls</button>
         <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="ledger">Ledger / Outbox</button>
+        <button class="tab px-3 py-2 border-b-2 border-transparent muted whitespace-nowrap" data-tab="stripe">💳 Stripe Live Dashboard</button>
         <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="evals">Evals</button>
       </div>
       <div id="tab-detail" class="tabpane"><div class="muted text-sm py-10 text-center">Select or run a ticket to inspect the agent's state.</div></div>
       <div id="tab-timeline" class="tabpane hidden"><div id="timeline" class="mono text-[11.5px] leading-5 max-h-[720px] overflow-auto scroll"></div></div>
       <div id="tab-tools" class="tabpane hidden"></div>
       <div id="tab-ledger" class="tabpane hidden"></div>
+      <div id="tab-stripe" class="tabpane hidden"></div>
       <div id="tab-evals" class="tabpane hidden"></div>
     </div>
   </section>
@@ -208,6 +237,70 @@
         <div class="text-[11px] text-slate-500 text-right leading-tight">Goes through the real inbound pipeline<br/>(<span class="font-mono">POST /api/email/simulate</span> → SSE → LangGraph)</div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ============================== CONNECT MAILBOX ============================== -->
+<div id="mailcfg" class="fixed inset-0 z-50 hidden">
+  <div class="absolute inset-0 bg-black/70 backdrop-blur-sm" data-mclose></div>
+  <div class="relative max-w-xl mx-auto mt-[4vh] panel p-5 fade-in max-h-[92vh] overflow-auto scroll">
+    <div class="flex items-start gap-3">
+      <div class="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/40 grid place-items-center shrink-0 text-lg">⚙️</div>
+      <div class="flex-1 min-w-0">
+        <h3 class="text-lg font-bold">Conectar casilla de correo de soporte</h3>
+        <div class="text-xs muted">Los emails de disputa que lleguen se convierten en tickets y el agente responde desde esta casilla. Sin tocar código ni reiniciar.</div>
+      </div>
+      <button data-mclose class="muted hover:text-white" aria-label="Cerrar"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+
+    <div id="mc-current" class="hidden mt-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs flex items-center gap-2"></div>
+
+    <div class="mt-4 text-[11px] uppercase tracking-wider muted mb-1.5">Proveedor</div>
+    <div id="mc-provider" class="seg grid grid-cols-3 gap-1.5 text-xs">
+      <button data-p="gmail" class="panel2 px-2 py-2 font-semibold">Gmail / Google Workspace<div class="text-[10px] font-normal opacity-80">Preconfigurado</div></button>
+      <button data-p="outlook" class="panel2 px-2 py-2 font-semibold">Outlook / Office 365<div class="text-[10px] font-normal opacity-80">Preconfigurado</div></button>
+      <button data-p="custom" class="panel2 px-2 py-2 font-semibold">IMAP personalizado<div class="text-[10px] font-normal opacity-80">host y puertos</div></button>
+    </div>
+
+    <label class="block mt-3 text-xs font-semibold" for="mc-email">Correo de soporte de la empresa</label>
+    <input id="mc-email" type="email" autocomplete="username" placeholder="soporte@miempresa.com (o tu email de prueba)" class="w-full mt-1 px-2.5 py-2 text-sm" />
+
+    <label class="block mt-3 text-xs font-semibold" for="mc-pass">Contraseña de aplicación (App Password)</label>
+    <div class="flex gap-1.5 mt-1">
+      <input id="mc-pass" type="password" autocomplete="current-password" placeholder="xxxx xxxx xxxx xxxx" class="flex-1 px-2.5 py-2 text-sm mono tracking-wider" />
+      <button id="mc-eye" type="button" class="panel2 px-2.5 text-xs" aria-label="Mostrar u ocultar">👁</button>
+    </div>
+    <div id="mc-help" class="mt-2 rounded-lg border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-[11.5px] leading-relaxed"></div>
+
+    <div id="mc-custom" class="hidden grid grid-cols-[1fr_90px] gap-1.5 mt-3 text-xs">
+      <input id="mc-imap-host" placeholder="imap.miempresa.com" class="px-2.5 py-2" /><input id="mc-imap-port" type="number" value="993" class="px-2.5 py-2" />
+      <input id="mc-smtp-host" placeholder="smtp.miempresa.com" class="px-2.5 py-2" /><input id="mc-smtp-port" type="number" value="587" class="px-2.5 py-2" />
+    </div>
+
+    <details class="mt-3 text-xs">
+      <summary class="cursor-pointer muted">Opciones avanzadas</summary>
+      <div class="grid grid-cols-2 gap-2 mt-2">
+        <label>Carpeta / etiqueta<input id="mc-folder" value="INBOX" class="w-full mt-1 px-2.5 py-1.5" /></label>
+        <label>Escuchar cada (segundos)<input id="mc-poll" type="number" min="5" max="3600" value="5" class="w-full mt-1 px-2.5 py-1.5" /></label>
+      </div>
+      <label class="flex items-center gap-2 mt-2"><input id="mc-sender" type="checkbox" checked /> Responder automáticamente al cliente por SMTP desde esta casilla</label>
+      <div class="mt-3 panel2 p-2.5">
+        <div class="font-semibold">Remitente de prueba (opcional, modo demo)</div>
+        <div class="muted text-[11px] mb-1.5">Vincula tu email personal a un cliente del ledger para probar el ciclo completo con emails reales. Escribí desde <b>otra</b> cuenta (no desde la casilla de soporte).</div>
+        <div class="grid grid-cols-[1fr_1fr] gap-1.5">
+          <input id="mc-alias" type="email" placeholder="tu.email.personal@gmail.com" class="px-2.5 py-1.5" />
+          <select id="mc-alias-cus" class="px-2 py-1.5"><option value="">— cliente —</option></select>
+        </div>
+      </div>
+    </details>
+
+    <div id="mc-result" class="mt-3 text-xs min-h-[18px]"></div>
+    <div class="flex flex-wrap gap-2 mt-3 justify-end">
+      <button id="mc-disconnect" class="hidden mr-auto px-3 py-2 rounded-lg border border-rose-500/40 text-rose-300 hover:bg-rose-500/10 text-sm">Desconectar</button>
+      <button id="mc-test" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm font-semibold">🧪 Probar Conexión</button>
+      <button id="mc-save" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold">💾 Guardar y Activar Escucha Automática</button>
+    </div>
+    <div class="text-[10.5px] muted mt-3">La contraseña se guarda sólo en la base local (<span class="mono">data/sentinelops.db</span>, fuera de git) y nunca se devuelve por la API. Usá siempre una App Password revocable, nunca tu contraseña principal.</div>
   </div>
 </div>
 
@@ -357,10 +450,8 @@ async function loadHealth() {
     $("#hdr-llm").title = llm.circuit_reason || `circuit ${llm.circuit}, calls ${llm.calls_made}`;
     $("#hdr-rules").innerHTML = `<i data-lucide="scale" class="w-3 h-3"></i>HITL &gt; ${money(h.hitl_threshold_usd)} · judge ≥ ${h.judge_pass_threshold} · retries ${h.max_tool_retries}`;
     supportAddress = h.email.support_address;
-    const imap = h.email.listener_enabled, smtp = h.email.sender_enabled;
-    $("#hdr-mail").className = `pill ${imap ? "bg-sky-500/15 text-sky-300" : "bg-slate-800 text-slate-300"}`;
-    $("#hdr-mail").innerHTML = `<i data-lucide="mail" class="w-3 h-3"></i>${imap ? "IMAP live" : "webhook + simulator"}${smtp ? " · SMTP" : ""}`;
-    $("#hdr-mail").title = `Inbound: POST /api/webhooks/inbound-email${imap ? " + IMAP listener" : ""} · replies: ${smtp ? "real SMTP for real inbound mail" : "outbox (simulated delivery)"}`;
+    stripeStatus = h.stripe || stripeStatus;
+    renderAutopilot(h.autopilot);
     icons();
   } catch (e) { /* ignore */ }
 }
@@ -389,8 +480,10 @@ async function submitTicket(message, email) {
 }
 $("#ticket-form").onsubmit = (ev) => { ev.preventDefault(); submitTicket($("#f-msg").value.trim(), $("#f-email").value.trim()); };
 
+const ticketChannels = {};
 async function loadTickets() {
   const list = await api("/api/tickets?limit=100");
+  list.forEach(t => { ticketChannels[t.ticket_id] = t.channel; });
   $("#tk-count").textContent = list.length ? `${list.length}` : "";
   $("#tickets").innerHTML = list.length ? list.map(t => `
     <button class="tk text-left panel2 px-2.5 py-2 hover:border-indigo-500 transition ${t.ticket_id === selected ? "border-indigo-500" : ""}" data-id="${esc(t.ticket_id)}">
@@ -495,6 +588,9 @@ async function refreshDetail() {
   if (t.investigation_summary) h += `<div class="mb-3"><div class="text-[10.5px] uppercase tracking-wider muted mb-1">Investigation summary</div><div class="panel2 p-2.5 text-xs whitespace-pre-wrap">${esc(t.investigation_summary)}</div></div>`;
   if (receipt) h += `<div class="mb-3"><div class="text-[10.5px] uppercase tracking-wider muted mb-1">Execution receipt (Mock Stripe)</div><div class="panel2 p-2.5 text-xs mono">
       ${receipt.refunds.map(r => `<div>✓ ${esc(r.refund_id)} · ${money(r.amount)} · ${esc(r.transaction_id)} · ${esc(r.status)}</div>`).join("") || "<div class='muted'>no money moved</div>"}
+      ${(t.stripe_mirror || []).map(m => m.dashboard_url
+        ? `<div class="text-[#a5a1ff] mt-1">↳ Stripe test mode: <b>${esc(m.stripe_refund_id)}</b> on ${esc(m.payment_intent_id)} · <a class="underline" href="${esc(m.dashboard_url)}" target="_blank" rel="noopener noreferrer">↗ Abrir en Stripe.com</a> · <button class="underline" data-goto-stripe>ver panel</button></div>`
+        : `<div class="text-amber-300 mt-1">↳ Stripe mirror ${esc(m.status)}: ${esc(m.error || "")}</div>`).join("")}
       <div class="muted mt-1">${esc(receipt.note)}${receipt.secondary_actions_done.length ? " · " + esc(receipt.secondary_actions_done.join(", ")) : ""}</div></div></div>`;
   if (verdict) h += `<div class="mb-3"><div class="text-[10.5px] uppercase tracking-wider muted mb-1">LLM-as-a-Judge audit</div><div class="panel2 p-2.5 text-xs">
       <div class="flex items-center gap-2 mb-1"><span class="pill ${verdict.passed ? "bg-emerald-500/15 text-emerald-300" : "bg-rose-500/15 text-rose-300"}">${verdict.passed ? "PASSED" : "FAILED"}</span>
@@ -512,6 +608,7 @@ async function refreshDetail() {
   const pf = $('iframe[data-preview="detail"]');
   if (pf && outboxCache[t.ticket_id]) pf.srcdoc = outboxCache[t.ticket_id].body_html;
   const ob = $("#open-modal"); if (ob) ob.onclick = openModal;
+  $$("[data-goto-stripe]").forEach(b => b.onclick = () => showTab("stripe"));
   renderTools(t.tool_calls);
   icons();
 }
@@ -546,6 +643,10 @@ function renderTimeline() {
       lines.push(`<div class="logline text-sky-300">${esc(ts)} ✉ email received (${esc(ev.payload.source)}) from ${esc(ev.payload.from)} — “${esc(ev.payload.subject)}”${ev.payload.known_customer ? "" : " · sender is not an account holder"}</div>`);
     } else if (ev.type === "supervisor_alert") {
       lines.push(`<div class="logline text-amber-300">${esc(ts)} 🔔 supervisor alerted (${esc(ev.payload.recipient)}) — approval needed for ${money(ev.payload.amount)}</div>`);
+    } else if (ev.type === "autopilot_approved") {
+      lines.push(`<div class="logline text-emerald-300">${esc(ts)} ⚡ Auto-Pilot approved ${money(ev.payload.amount)} (policy-compliant, ≤ ceiling ${money(ev.payload.ceiling)}) — zero-touch</div>`);
+    } else if (ev.type === "autopilot_blocked") {
+      lines.push(`<div class="logline text-amber-200">${esc(ts)} ⚡ Auto-Pilot declined → human required: ${esc((ev.payload.reasons || []).join("; "))}</div>`);
     }
   }
   $("#timeline").innerHTML = lines.join("") || `<div class="muted text-sm py-6 text-center font-sans">No events yet.</div>`;
@@ -599,12 +700,16 @@ $("#m-approve").onclick = () => decide(true);
 $("#m-reject").onclick = () => decide(false);
 
 // ---------------------------------------------------------------- tabs
-$$(".tab").forEach(t => t.onclick = () => {
-  $$(".tab").forEach(x => x.classList.toggle("active", x === t));
-  $$(".tabpane").forEach(p => p.classList.toggle("hidden", p.id !== `tab-${t.dataset.tab}`));
-  if (t.dataset.tab === "ledger") loadLedger();
-  if (t.dataset.tab === "evals") loadEvals();
-});
+let activeTab = "detail";
+function showTab(name) {
+  activeTab = name;
+  $$(".tab").forEach(x => x.classList.toggle("active", x.dataset.tab === name));
+  $$(".tabpane").forEach(p => p.classList.toggle("hidden", p.id !== `tab-${name}`));
+  if (name === "ledger") loadLedger();
+  if (name === "evals") loadEvals();
+  if (name === "stripe") loadStripe();
+}
+$$(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
 
 const deliveryLabel = (d) => ({smtp: "Delivered via SMTP", outbox: "Outbox · simulated delivery", smtp_failed: "SMTP failed · kept in outbox", simulated: "Simulated alert", pending: "Sending…"}[d] || d || "outbox");
 let outboxCache = {};
@@ -752,6 +857,225 @@ function desktopAlert(ev) {
   try { new Notification("⚠️ New Email requires billing supervisor approval", {body: `${ev.ticket_id} · ${money(ev.payload.amount)} · ${ev.payload.sender || ""}`}); } catch { /* ignore */ }
 }
 
+// ---------------------------------------------------------------- auto-pilot
+let autopilot = {enabled: false, max_usd: 1000};
+function renderAutopilot(ap) {
+  if (ap) autopilot = ap;
+  const on = !!autopilot.enabled;
+  $("#ap-switch").classList.toggle("on", on);
+  $("#ap-label").textContent = on ? "ON" : "OFF";
+  $("#ap-label").className = on ? "text-emerald-300" : "text-slate-400";
+  $("#btn-autopilot").setAttribute("aria-checked", String(on));
+  $("#btn-autopilot").title = on
+    ? `Auto-Pilot ON: payouts that comply with policy (no injection, verified sender, risk not HIGH) up to ${money(autopilot.max_usd)} are approved and executed with zero clicks. Everything else waits for a supervisor.`
+    : "Auto-Pilot OFF: every payout above the HITL threshold waits for a human supervisor.";
+}
+$("#btn-autopilot").onclick = async () => {
+  try {
+    renderAutopilot(await api("/api/autopilot", {method: "PUT", body: JSON.stringify({enabled: !autopilot.enabled})}));
+    toast(autopilot.enabled ? `⚡ Auto-Pilot ON — zero-touch hasta ${money(autopilot.max_usd)}` : "Auto-Pilot OFF — todo pago > umbral espera a un humano", autopilot.enabled ? "ok" : "warn");
+  } catch (e) { toast("Auto-Pilot: " + e.message, "bad"); }
+};
+
+// ---------------------------------------------------------------- mailbox (connect from UI)
+let mailCfg = null;
+async function loadMailStatus() {
+  try { mailCfg = await api("/api/email/config"); } catch { return; }
+  const b = $("#hdr-mail");
+  const l = mailCfg.listener || {};
+  if (mailCfg.connected) {
+    const err = l.last_error;
+    b.className = `pill cursor-pointer ${err ? "bg-amber-500/15 text-amber-300" : "bg-emerald-500/15 text-emerald-300"}`;
+    b.innerHTML = err
+      ? `🟠 Correo con error: ${esc(mailCfg.email)} (reintentando)`
+      : `<span class="live-dot"></span> 🟢 Correo Activo: ${esc(mailCfg.email)} (Escuchando en vivo cada ${esc(mailCfg.poll_interval_s)}s)`;
+    b.title = `IMAP ${mailCfg.imap_host} · carpeta ${mailCfg.folder} · polls ${l.polls} · tickets ${l.ingested}${l.last_poll_at ? " · último " + l.last_poll_at.slice(11, 19) : ""}${err ? "\n" + err : ""}${mailCfg.sender_enabled ? "\nRespuestas por SMTP: activas" : ""}`;
+  } else {
+    b.className = "pill bg-slate-800 text-slate-300 cursor-pointer hover:bg-slate-700";
+    b.innerHTML = "⚪ Correo no conectado (Click para configurar)";
+    b.title = "Conectá una casilla Gmail / Outlook / IMAP para recibir disputas reales";
+  }
+}
+let mcProvider = "gmail";
+function setProvider(p) {
+  mcProvider = p;
+  $$("#mc-provider button").forEach(x => x.classList.toggle("on", x.dataset.p === p));
+  $("#mc-custom").classList.toggle("hidden", p !== "custom");
+  const preset = (mailCfg && mailCfg.providers && mailCfg.providers[p]) || {};
+  const steps = {
+    gmail: `<b>Cómo obtener la App Password de Gmail (2 minutos):</b><ol class="list-decimal ml-4 mt-1"><li>Activá la <b>verificación en 2 pasos</b> en tu cuenta Google.</li><li>Abrí <a class="text-sky-300 underline" href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer">myaccount.google.com/apppasswords</a>, escribí “SentinelOps” y tocá <i>Crear</i>.</li><li>Copiá las <b>16 letras</b> (los espacios no importan) y pegalas acá.</li></ol><div class="muted mt-1">IMAP ya viene habilitado en Gmail. En Google Workspace el admin debe permitir IMAP.</div>`,
+    outlook: `<b>Outlook / Office 365:</b> habilitá IMAP y “SMTP AUTH” en la cuenta y generá una App Password en <a class="text-sky-300 underline" href="https://account.live.com/proofs/AppPassword" target="_blank" rel="noopener noreferrer">account.live.com</a>. <div class="text-amber-300 mt-1">Ojo: muchos tenants de Microsoft 365 bloquean la autenticación básica y sólo aceptan OAuth2; si la prueba falla, usá Gmail o IMAP personalizado.</div>`,
+    custom: `<b>IMAP personalizado:</b> servidor IMAP con SSL (puerto 993) y SMTP con STARTTLS (587) o SSL (465). Usá un usuario/contraseña de aplicación dedicados.`,
+  };
+  $("#mc-help").innerHTML = steps[p] || esc(preset.help || "");
+}
+$$("#mc-provider button").forEach(b => b.onclick = () => setProvider(b.dataset.p));
+$("#mc-eye").onclick = () => { const i = $("#mc-pass"); i.type = i.type === "password" ? "text" : "password"; };
+async function openMailCfg() {
+  await loadMailStatus();
+  const c = mailCfg || {};
+  setProvider(c.provider || "gmail");
+  if (c.saved_email && !$("#mc-email").value) $("#mc-email").value = c.saved_email;
+  $("#mc-pass").value = "";
+  $("#mc-pass").placeholder = c.has_saved_password ? "•••••••• (guardada — dejá vacío para mantenerla)" : "xxxx xxxx xxxx xxxx";
+  if (c.folder) $("#mc-folder").value = c.folder;
+  if (c.poll_interval_s) $("#mc-poll").value = c.poll_interval_s;
+  $("#mc-current").classList.toggle("hidden", !c.connected);
+  $("#mc-current").innerHTML = c.connected ? `<span class="live-dot"></span><span>Conectado a <b>${esc(c.email)}</b> · ${esc(c.imap_host)} · cada ${esc(c.poll_interval_s)}s${c.sender_enabled ? " · responde por SMTP" : ""}</span>` : "";
+  $("#mc-disconnect").classList.toggle("hidden", !c.connected);
+  $("#mc-result").innerHTML = "";
+  try {
+    const l = await api("/api/ledger");
+    $("#mc-alias-cus").innerHTML = `<option value="">— cliente del ledger —</option>` + l.customers.map(x => `<option value="${esc(x.id)}">${esc(x.name)} · ${esc(x.email)}</option>`).join("");
+  } catch { /* optional */ }
+  $("#mailcfg").classList.remove("hidden");
+  icons();
+  setTimeout(() => (($("#mc-email").value ? $("#mc-pass") : $("#mc-email"))).focus(), 50);
+}
+function mailPayload() {
+  const body = {
+    provider: mcProvider,
+    email: $("#mc-email").value.trim(),
+    app_password: $("#mc-pass").value.trim() || null,
+    folder: $("#mc-folder").value.trim() || "INBOX",
+    poll_interval_s: Math.max(5, Number($("#mc-poll").value) || 5),
+    enable_sender: $("#mc-sender").checked,
+  };
+  if (mcProvider === "custom") Object.assign(body, {
+    imap_host: $("#mc-imap-host").value.trim() || null, imap_port: Number($("#mc-imap-port").value) || 993,
+    smtp_host: $("#mc-smtp-host").value.trim() || null, smtp_port: Number($("#mc-smtp-port").value) || 587,
+  });
+  const alias = $("#mc-alias").value.trim(), cus = $("#mc-alias-cus").value;
+  if (alias || cus) Object.assign(body, {demo_alias_email: alias || null, demo_alias_customer_id: cus || null});
+  return body;
+}
+function renderCheck(check) {
+  const row = (label, r) => r.ok === null || r.ok === undefined ? "" :
+    `<div class="flex gap-2 items-start ${r.ok ? "text-emerald-300" : "text-rose-300"}"><span>${r.ok ? "✅" : "❌"}</span><span><b>${label}</b> ${r.ok
+      ? esc(label === "IMAP" ? `${r.host} · carpeta ${r.folder}${r.messages != null ? ` · ${r.messages} mensajes` : ""} · ${r.unseen} sin leer` : `${r.host}:${r.port} · login OK`)
+      : esc(r.error || "falló")}</span></div>`;
+  return row("IMAP", check.imap || {}) + row("SMTP", check.smtp || {});
+}
+async function mailAction(path, btn) {
+  const body = mailPayload();
+  if (!/^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/.test(body.email)) { $("#mc-result").innerHTML = `<span class="text-rose-300">Ingresá un correo válido.</span>`; return null; }
+  if (!body.app_password && !(mailCfg && mailCfg.has_saved_password && mailCfg.saved_email === body.email.toLowerCase())) { $("#mc-result").innerHTML = `<span class="text-rose-300">Pegá la App Password.</span>`; return null; }
+  const label = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = `<span class="animate-pulse">Conectando con el servidor…</span>`;
+  try { return await api(path, {method: "POST", body: JSON.stringify(body)}); }
+  catch (e) { $("#mc-result").innerHTML = `<span class="text-rose-300">❌ ${esc(e.message)}</span>`; return null; }
+  finally { btn.disabled = false; btn.innerHTML = label; }
+}
+$("#mc-test").onclick = async () => {
+  const r = await mailAction("/api/email/test-connection", $("#mc-test"));
+  if (r) $("#mc-result").innerHTML = (r.ok ? `<div class="text-emerald-300 font-semibold mb-1">Conexión verificada ✔ — ya podés guardar.</div>` : "") + renderCheck(r);
+};
+$("#mc-save").onclick = async () => {
+  const r = await mailAction("/api/email/save-config", $("#mc-save"));
+  if (!r) return;
+  if (!r.saved) { $("#mc-result").innerHTML = `<div class="text-rose-300 font-semibold mb-1">No se guardó: la verificación falló.</div>` + renderCheck(r.check); return; }
+  $("#mailcfg").classList.add("hidden");
+  toast(`🟢 Correo conectado: ${r.status.email} — escuchando cada ${r.status.poll_interval_s}s`, "ok");
+  supportAddress = r.status.email;
+  loadMailStatus(); loadHealth();
+};
+$("#mc-disconnect").onclick = async () => {
+  await api("/api/email/disconnect", {method: "POST"});
+  $("#mailcfg").classList.add("hidden");
+  toast("Casilla desconectada — escucha detenida", "warn");
+  loadMailStatus(); loadHealth();
+};
+$("#btn-mailcfg").onclick = openMailCfg;
+$("#hdr-mail").onclick = openMailCfg;
+$$("[data-mclose]").forEach(x => x.onclick = () => $("#mailcfg").classList.add("hidden"));
+
+// ---------------------------------------------------------------- stripe live dashboard
+let stripeStatus = {configured: false, mode: "disabled"};
+let stripeFlash = new Set();
+let stripeTimer = null;
+const fmtDate = (iso) => iso ? new Date(iso).toLocaleString("es-AR", {day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit"}) : "—";
+const cur = (n, c = "USD") => Number(n || 0).toLocaleString("en-US", {style: "currency", currency: c || "USD"});
+async function loadStripe() {
+  clearTimeout(stripeTimer);
+  let d;
+  try { d = await api("/api/stripe/dashboard-sync?limit=15"); } catch (e) { $("#tab-stripe").innerHTML = `<div class="text-rose-300 text-sm">${esc(e.message)}</div>`; return; }
+  stripeStatus = d;
+  const pane = $("#tab-stripe");
+  if (!d.configured) {
+    pane.innerHTML = `<div class="stripe"><div class="card p-5 text-sm">
+      <div class="text-lg font-bold mb-1">💳 Stripe no está conectado</div>
+      <div class="lbl mb-3">Agregá tu clave secreta de <b>modo test</b> al archivo <span class="mono">.env</span> y reiniciá el servidor:</div>
+      <pre class="mono text-xs bg-[#f6f9fc] p-2 rounded">STRIPE_API_KEY=sk_test_...</pre>
+      <div class="lbl mt-3">Cada reembolso del ledger se replicará en Stripe (test) y lo vas a ver acá en tiempo real. Las claves <span class="mono">sk_live_</span> sólo se usan en modo lectura: SentinelOps nunca crea cobros ni reembolsos reales.</div>
+      ${d.error ? `<div class="badge-bad inline-block mt-2">${esc(d.error)}</div>` : ""}</div></div>`;
+    return;
+  }
+  const b = d.balance || {available: [], pending: []};
+  const avail = (b.available || [])[0] || {amount: 0, currency: "USD"}, pend = (b.pending || [])[0] || {amount: 0, currency: "USD"};
+  const base = `https://dashboard.stripe.com/${d.account_id ? d.account_id + "/" : ""}${d.mode === "test" ? "test/" : ""}`;
+  const refundsTotal = (d.refunds || []).filter(r => r.status === "succeeded").reduce((a, r) => a + r.amount, 0);
+  const statusBadge = (s) => `<span class="${s === "succeeded" ? "badge-ok" : s === "pending" ? "badge-pend" : "badge-bad"}">${esc(s)}${s === "succeeded" ? " ✓" : ""}</span>`;
+  const failed = (d.mirror || []).filter(m => m.status === "failed");
+  pane.innerHTML = `<div class="stripe">
+    <div class="flex flex-wrap items-center gap-2 mb-3">
+      <div class="text-[15px] font-bold tracking-tight"><span style="color:#635bff">stripe</span> · Live Dashboard</div>
+      ${d.mode === "test" ? `<span class="badge-pend">TEST MODE</span>` : `<span class="badge-bad">LIVE · solo lectura</span>`}
+      <span class="lbl mono">${esc(d.account_id || "")}</span>
+      <div class="flex-1"></div>
+      <span class="lbl">sync ${fmtDate(d.fetched_at)}</span>
+      <button id="st-refresh" class="lnk text-xs">⟳</button>
+      <a class="btn" href="${esc(base + "payments")}" target="_blank" rel="noopener noreferrer">↗ Abrir en Stripe.com</a>
+    </div>
+    ${d.error ? `<div class="card p-3 mb-3 text-sm"><span class="badge-bad">error</span> ${esc(d.error)}</div>` : ""}
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
+      <div class="card p-3"><div class="lbl">Balance disponible</div><div class="text-2xl font-bold mt-1">${cur(avail.amount, avail.currency)}</div><div class="lbl mt-0.5">${avail.amount < 0 ? "negativo: Stripe no devuelve su comisión al reembolsar" : esc(avail.currency)}</div></div>
+      <div class="card p-3"><div class="lbl">Pendiente</div><div class="text-2xl font-bold mt-1">${cur(pend.amount, pend.currency)}</div><div class="lbl mt-0.5">en tránsito</div></div>
+      <div class="card p-3"><div class="lbl">Reembolsado (últimos ${(d.refunds || []).length})</div><div class="text-2xl font-bold mt-1" style="color:#635bff">${cur(refundsTotal)}</div><div class="lbl mt-0.5">${d.mirror_enabled ? "espejo del ledger activo" : "espejo desactivado"}</div></div>
+    </div>
+    ${failed.length ? `<div class="card p-2.5 mb-3 text-xs"><span class="badge-bad">${failed.length} sin replicar</span> ${failed.slice(0, 3).map(m => `${esc(m.ticket_id)}: ${esc(m.error)}`).join(" · ")}</div>` : ""}
+    <div class="card mb-3 overflow-x-auto">
+      <div class="px-3 pt-3 pb-1 font-semibold text-sm">Reembolsos</div>
+      <table class="w-full text-xs"><thead><tr class="text-left"><th class="px-3 py-1.5">Importe</th><th class="pr-2">Estado</th><th class="pr-2">ID</th><th class="pr-2">Cliente</th><th class="pr-2">Ticket</th><th class="pr-2">Fecha</th><th></th></tr></thead><tbody>
+      ${(d.refunds || []).map(r => `<tr class="${stripeFlash.has(r.id) ? "flash" : ""}">
+        <td class="px-3 py-2 font-semibold">${cur(r.amount, r.currency)} <span class="lbl">${esc(r.currency)}</span></td>
+        <td class="pr-2">${statusBadge(r.status)}</td>
+        <td class="pr-2 mono">${esc(r.id)}</td>
+        <td class="pr-2">${esc(r.customer || "—")}</td>
+        <td class="pr-2 mono">${r.ticket_id ? `<button class="lnk" data-st-ticket="${esc(r.ticket_id)}">${esc(r.ticket_id)}</button>` : "—"}</td>
+        <td class="pr-2 whitespace-nowrap">${fmtDate(r.created)}</td>
+        <td class="pr-3 text-right"><a class="lnk whitespace-nowrap" href="${esc(r.dashboard_url)}" target="_blank" rel="noopener noreferrer">↗ Abrir en Stripe.com</a></td></tr>`).join("")
+        || `<tr><td colspan="7" class="px-3 py-4 lbl">Todavía no hay reembolsos. Enviá un email de prueba con Auto-Pilot ON.</td></tr>`}
+      </tbody></table>
+    </div>
+    <div class="card overflow-x-auto">
+      <div class="px-3 pt-3 pb-1 font-semibold text-sm">Pagos</div>
+      <table class="w-full text-xs"><thead><tr class="text-left"><th class="px-3 py-1.5">Importe</th><th class="pr-2">Estado</th><th class="pr-2">Descripción</th><th class="pr-2">Cliente</th><th class="pr-2">Fecha</th><th></th></tr></thead><tbody>
+      ${(d.charges || []).map(c => `<tr>
+        <td class="px-3 py-2 font-semibold">${cur(c.amount, c.currency)}</td>
+        <td class="pr-2">${c.refunded ? `<span class="badge-pend">reembolsado</span>` : c.amount_refunded ? `<span class="badge-pend">parcial −${cur(c.amount_refunded, c.currency)}</span>` : statusBadge(c.status)}</td>
+        <td class="pr-2 truncate max-w-[220px]">${esc(c.description || "—")}</td>
+        <td class="pr-2">${esc(c.customer || "—")}</td>
+        <td class="pr-2 whitespace-nowrap">${fmtDate(c.created)}</td>
+        <td class="pr-3 text-right whitespace-nowrap">${c.receipt_url ? `<a class="lnk" href="${esc(c.receipt_url)}" target="_blank" rel="noopener noreferrer">comprobante</a> · ` : ""}<a class="lnk" href="${esc(c.dashboard_url)}" target="_blank" rel="noopener noreferrer">↗</a></td></tr>`).join("")
+        || `<tr><td colspan="6" class="px-3 py-4 lbl">Sin pagos.</td></tr>`}
+      </tbody></table>
+    </div>
+  </div>`;
+  $("#st-refresh").onclick = loadStripe;
+  $$("[data-st-ticket]").forEach(x => x.onclick = () => { selectTicket(x.dataset.stTicket); });
+  stripeFlash = new Set();
+  if (activeTab === "stripe") stripeTimer = setTimeout(loadStripe, 5000);  // live while visible
+}
+function onStripeMirrored(ev) {
+  const mirrored = (ev.payload?.delta?.stripe_mirror || []).filter(m => m.status === "mirrored" || m.status === "duplicate");
+  if (!mirrored.length) return;
+  mirrored.forEach(m => m.stripe_refund_id && stripeFlash.add(m.stripe_refund_id));
+  const total = mirrored.reduce((a, m) => a + m.amount, 0);
+  const isEmail = (ticketChannels[ev.ticket_id] || "") === "email";
+  toast(`💳 ${money(total)} reembolsado en Stripe (${mirrored.map(m => m.stripe_refund_id).join(", ")})`, "ok");
+  if (isEmail && ev.ticket_id === selected) showTab("stripe"); else if (activeTab === "stripe") loadStripe();
+}
+
 // ---------------------------------------------------------------- SSE
 function connectSSE() {
   const es = new EventSource("/api/stream");
@@ -760,7 +1084,9 @@ function connectSSE() {
   es.onerror = () => dot("bg-rose-400", "reconnecting");
   const handle = (msg) => {
     const ev = JSON.parse(msg.data);
+    if (ev.type === "autopilot_changed") { renderAutopilot(ev.payload); return; }
     if (ev.type === "email_received") {
+      ticketChannels[ev.ticket_id] = "email";
       toast(`📧 New email from ${ev.payload.from} — “${ev.payload.subject || "(no subject)"}”`, "info");
       // Auto-follow incoming mail so the graph is visibly picked up in real time.
       const busy = !$("#modal").classList.contains("hidden") || !$("#compose").classList.contains("hidden");
@@ -772,8 +1098,12 @@ function connectSSE() {
       applyEventToGraph(ev);
       renderTimeline();
       scheduleDetail();
-      if (ev.type === "interrupt") setTimeout(async () => { await refreshDetail(); openModal(); }, 250);
+      // Open the HITL modal only when the run really parked for a human (Auto-Pilot may resume it first).
+      if (ev.type === "paused" && (ev.payload.next || []).includes("human_gate")) setTimeout(async () => { await refreshDetail(); openModal(); }, 150);
+      if (ev.type === "decision" && !$("#modal").classList.contains("hidden") && currentPending && currentPending.ticket_id === ev.ticket_id) closeModal();
     }
+    if (ev.type === "node_completed" && ev.node === "action_executor") onStripeMirrored(ev);
+    if (ev.type === "autopilot_approved") toast(`⚡ Auto-Pilot aprobó ${money(ev.payload.amount)} en ${ev.ticket_id} — sin intervención humana`, "ok");
     if (["run_completed", "paused", "run_error", "ticket_created", "decision"].includes(ev.type)) { loadTickets(); loadApprovals(); loadHealth(); }
     if (ev.type === "run_completed") refreshOutboxCache().then(() => { if (ev.ticket_id === selected) scheduleDetail(); });
     if (ev.type === "supervisor_alert") {
@@ -784,14 +1114,16 @@ function connectSSE() {
     }
     if (ev.type === "run_completed" && ev.ticket_id === selected) toast(`${ev.ticket_id} → ${ev.payload.status}`, ev.payload.status === "EXECUTED" ? "ok" : "info");
   };
-  ["ticket_created", "email_received", "node_started", "node_completed", "interrupt", "paused", "supervisor_alert", "decision", "run_completed", "run_error"]
+  ["ticket_created", "email_received", "node_started", "node_completed", "interrupt", "paused", "supervisor_alert", "decision", "run_completed", "run_error",
+   "autopilot_approved", "autopilot_blocked", "autopilot_changed"]
     .forEach(t => es.addEventListener(t, handle));
 }
 
 // ---------------------------------------------------------------- boot
 drawGraph(); icons();
-loadHealth(); loadScenarios(); loadTickets(); loadApprovals(); refreshOutboxCache(); connectSSE();
+loadHealth(); loadMailStatus(); loadScenarios(); loadTickets(); loadApprovals(); refreshOutboxCache(); connectSSE();
 setInterval(loadHealth, 30000);
+setInterval(loadMailStatus, 5000);
 </script>
 </body>
 </html>

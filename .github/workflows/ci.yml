@@ -19,7 +19,7 @@ jobs:
       - name: Type check (mypy --strict)
         run: mypy
       - name: Unit + integration + API tests
-        run: pytest tests/test_units.py tests/test_graph.py tests/test_api.py -v
+        run: pytest tests/test_units.py tests/test_graph.py tests/test_api.py tests/test_email.py tests/test_autopilot_stripe.py -v
       - name: Agent evaluation suite (CI gate)
         run: pytest tests/eval_suite.py -v
       - uses: actions/upload-artifact@v4

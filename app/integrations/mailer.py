@@ -29,6 +29,20 @@ Transport = Callable[[EmailMessage], None]
 REAL_DELIVERY_SOURCES = frozenset({"imap", "webhook"})
 
 
+def smtp_session(host: str, port: int, *, timeout: float) -> smtplib.SMTP:
+    """Implicit TLS on 465, STARTTLS otherwise (587 / 25). Certificates are always verified."""
+    context = ssl.create_default_context()
+    if port == 465:
+        return smtplib.SMTP_SSL(host, port, timeout=timeout, context=context)
+    smtp = smtplib.SMTP(host, port, timeout=timeout)
+    try:
+        smtp.starttls(context=context)
+    except Exception:
+        smtp.close()
+        raise
+    return smtp
+
+
 class Mailer:
     TOOL_NAME = "email.send"
 
@@ -51,8 +65,7 @@ class Mailer:
         creds = self.settings.smtp_credentials
         if creds is None:
             raise RuntimeError("SMTP credentials are not configured")
-        with smtplib.SMTP(self.settings.smtp_host, self.settings.smtp_port, timeout=20) as smtp:
-            smtp.starttls(context=ssl.create_default_context())
+        with smtp_session(self.settings.smtp_host, self.settings.smtp_port, timeout=20) as smtp:
             smtp.login(*creds)
             smtp.send_message(msg)
 

@@ -49,12 +49,17 @@ class InboundEmailService:
             return IngestResult(existing, True, email.message_id, False)
 
         customer = await rt.deps.repo.get_customer_by_email(email.from_address)
+        alias_of: str | None = None
+        if customer is None:
+            customer = await rt.deps.repo.get_customer_by_alias(email.from_address)
+            alias_of = customer.email if customer else None
         meta = ChannelMeta(
             channel="email",
             inbound_source=email.source,
             sender_email=email.from_address,
             subject=email.subject or None,
             message_id=email.message_id,
+            sender_alias_of=alias_of,
         )
         await rt.emit(
             tid,
@@ -67,6 +72,7 @@ class InboundEmailService:
                 "source": email.source,
                 "message_id": email.message_id,
                 "known_customer": customer is not None,
+                "verified_alias_of": alias_of,
             },
         )
         customer_email = customer.email if customer else None

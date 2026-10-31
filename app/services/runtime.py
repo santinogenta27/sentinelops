@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +18,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command, StreamMode
 
+from app.agent.autopilot import AUTOPILOT_REVIEWER, autopilot_verdict
 from app.agent.graph import build_graph
 from app.agent.nodes import AgentDeps
 from app.config import Settings
@@ -27,6 +28,7 @@ from app.db.seed import seed_database
 from app.integrations.crm_mock import CRMMock
 from app.integrations.mailer import Mailer, Transport
 from app.integrations.faults import FaultInjector, fault_injector
+from app.integrations.stripe_live import StripeBackend, StripeLive
 from app.integrations.stripe_mock import StripeMock
 from app.llm.base import LLMClient
 from app.llm.factory import build_llm
@@ -34,6 +36,7 @@ from app.models.schemas import TERMINAL_STATUSES, ChannelMeta, HumanDecision, Ti
 from app.models.state import AgentState, initial_state
 from app.rag.embeddings import Embedder, GeminiEmbedder, HashingEmbedder
 from app.rag.retriever import PolicyRetriever, load_policies
+from app.services.controls import RuntimeControls
 
 logger = logging.getLogger("sentinelops.runtime")
 
@@ -105,7 +108,9 @@ class SentinelRuntime:
         deps: AgentDeps,
         graph: CompiledStateGraph[AgentState, None, AgentState, AgentState],
         owned: _Owned,
+        controls: RuntimeControls,
     ) -> None:
+        self.controls = controls
         self.settings = settings
         self.db = db
         self.deps = deps
@@ -126,6 +131,7 @@ class SentinelRuntime:
         faults: FaultInjector | None = None,
         persist_vectors: bool = True,
         mail_transport: Transport | None = None,
+        stripe_backend: Callable[[str], StripeBackend] | None = None,
     ) -> SentinelRuntime:
         db = Database(settings.business_db_path)
         await db.init_schema()
@@ -152,7 +158,10 @@ class SentinelRuntime:
             mailer=Mailer(db, injector, settings, transport=mail_transport),
             faults=injector,
             llm=llm_client,
+            stripe_live=StripeLive(db, settings, backend_factory=stripe_backend),
         )
+        controls = RuntimeControls(db, settings)
+        await controls.load()
         owned = _Owned()
         checkpointer: BaseCheckpointSaver[str]
         if persistent_checkpoints:
@@ -163,7 +172,7 @@ class SentinelRuntime:
         else:
             checkpointer = InMemorySaver()
         graph = build_graph(deps, checkpointer)
-        return cls(settings=settings, db=db, deps=deps, graph=graph, owned=owned)
+        return cls(settings=settings, db=db, deps=deps, graph=graph, owned=owned, controls=controls)
 
     async def close(self) -> None:
         for t in list(self._tasks):
@@ -219,9 +228,28 @@ class SentinelRuntime:
         status = str(values.get("execution_status", "FAILED"))
         await self.db.upsert_ticket(ticket_id, values["raw_message"], values.get("customer_email"), status, _summarise(values))
         if snap.next:
-            await self.emit(ticket_id, "paused", None, {"next": list(snap.next), "status": status})
             if tuple(snap.next) == ("human_gate",):
+                ap = self.controls.autopilot
+                verdict = autopilot_verdict(values, enabled=ap.enabled, max_usd=ap.max_usd)
+                if verdict.eligible:
+                    # Zero-touch: the interrupt was raised (auditable) and is resumed by policy, not a person.
+                    decision = HumanDecision(
+                        approved=True,
+                        reviewer=AUTOPILOT_REVIEWER,
+                        reason=f"policy-compliant payout ${verdict.amount:,.2f} ≤ auto-pilot ceiling ${ap.max_usd:,.2f}",
+                    )
+                    await self.emit(
+                        ticket_id, "autopilot_approved", "human_gate",
+                        {"amount": verdict.amount, "ceiling": ap.max_usd, "channel": values.get("channel") or "web"},
+                    )
+                    await self.emit(ticket_id, "decision", "human_gate", decision.model_dump(mode="json"))
+                    return await self._drive(ticket_id, Command(resume=decision.model_dump(mode="json")))
+                await self.emit(ticket_id, "paused", None, {"next": list(snap.next), "status": status})
+                if ap.enabled:
+                    await self.emit(ticket_id, "autopilot_blocked", "human_gate", {"reasons": verdict.reasons})
                 await self._alert_supervisor(ticket_id, values)
+            else:
+                await self.emit(ticket_id, "paused", None, {"next": list(snap.next), "status": status})
         else:
             await self.emit(ticket_id, "run_completed", None, {"status": status})
         return values
@@ -291,6 +319,7 @@ class SentinelRuntime:
             sender_email=m.sender_email,
             email_subject=m.subject,
             email_message_id=m.message_id,
+            sender_alias_of=m.sender_alias_of,
         )
         async with self._lock(tid):
             values = await self._drive(tid, state)

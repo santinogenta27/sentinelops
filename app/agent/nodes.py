@@ -21,6 +21,7 @@ from langgraph.types import interrupt
 from pydantic import ValidationError
 
 from app.agent import heuristics, prompts
+from app.agent.autopilot import AUTOPILOT_REVIEWER
 from app.agent.engine import (
     MAX_LOOKBACK_DAYS,
     assess_risk,
@@ -35,6 +36,7 @@ from app.db.repository import Repository
 from app.integrations.crm_mock import CRMMock
 from app.integrations.mailer import Mailer
 from app.integrations.faults import FaultInjector, ToolError
+from app.integrations.stripe_live import StripeLive
 from app.integrations.stripe_mock import StripeMock
 from app.llm.base import LLMClient, LLMError, LLMTask
 from app.models.schemas import (
@@ -76,6 +78,7 @@ class AgentDeps:
     faults: FaultInjector
     llm: LLMClient | None
     clock: Callable[[], datetime] = field(default=utcnow)
+    stripe_live: StripeLive | None = None  # real Stripe (test mode) mirror; None = ledger only
 
 
 def _log(node: str, message: str) -> str:
@@ -112,7 +115,11 @@ class SentinelNodes:
     def _sender_mismatch(state: AgentState, customer: CustomerRecord | None) -> bool:
         """Email channel: the request came from an address that does not own the account."""
         sender = state.get("sender_email")
-        return bool(sender and customer is not None and customer.email != sender)
+        if not sender or customer is None:
+            return False
+        if state.get("sender_alias_of") == customer.email:
+            return False  # operator-verified alias of exactly this account
+        return customer.email != sender
 
     @staticmethod
     def _transactions(state: AgentState) -> list[TransactionRecord]:
@@ -455,12 +462,17 @@ class SentinelNodes:
         )
         decision = HumanDecision.model_validate(raw_decision)
         verdict = "APPROVED" if decision.approved else f"REJECTED ({decision.reason})"
+        who = (
+            "⚡ Auto-Pilot (policy-compliant, zero-touch)"
+            if decision.reviewer == AUTOPILOT_REVIEWER
+            else f"supervisor {decision.reviewer}"
+        )
         return {
             "human_approved": decision.approved,
             "reviewer": decision.reviewer,
             "rejection_reason": None if decision.approved else decision.reason,
             "execution_status": "EXECUTING" if decision.approved else "DRAFTING",
-            "logs": [_log(node, f"supervisor {decision.reviewer} → {verdict}")],
+            "logs": [_log(node, f"{who} → {verdict}")],
         }
 
     # ============================================================ ACTION EXECUTOR
@@ -539,6 +551,8 @@ class SentinelNodes:
         if done:
             logs.append(_log(node, f"secondary actions done: {done}"))
 
+        mirror = await self._mirror_to_stripe(state, action, receipts, approver, logs, tool_calls)
+
         executed = not failures
         if action.action_type != "REFUND":
             logs.append(_log(node, f"no payout for {action.action_type}"))
@@ -551,9 +565,54 @@ class SentinelNodes:
         return {
             "execution_receipt": receipt.model_dump(mode="json"),
             "execution_status": "DRAFTING",
+            "stripe_mirror": mirror,
             "tool_calls": tool_calls,
             "logs": logs,
         }
+
+    async def _mirror_to_stripe(
+        self,
+        state: AgentState,
+        action: ResolutionAction,
+        receipts: list[RefundReceipt],
+        approver: str,
+        logs: list[str],
+        tool_calls: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Mirror ledger refunds into Stripe TEST mode (observability only — never affects the outcome)."""
+        live = self.d.stripe_live
+        if live is None or not live.mirror_enabled or not receipts:
+            return list(state.get("stripe_mirror") or [])
+        node = "action_executor"
+        customer = self._customer(state)
+        txns = {t.id: t for t in self._transactions(state)}
+        out: list[dict[str, Any]] = []
+        for rec in receipts:
+            txn = txns.get(rec.transaction_id) or await self.d.repo.get_transaction(rec.transaction_id)
+            started = time.perf_counter()
+            result = await live.mirror_refund(
+                local_refund_id=rec.refund_id,
+                ticket_id=state["ticket_id"],
+                transaction_id=rec.transaction_id,
+                transaction_amount=txn.amount if txn else rec.amount,
+                amount=rec.amount,
+                currency=rec.currency,
+                reason_code=action.reason_code,
+                customer_email=customer.email if customer else None,
+                customer_name=customer.name if customer else None,
+                approved_by=approver,
+            )
+            args: dict[str, object] = {"ledger_refund_id": rec.refund_id, "amount": rec.amount, "mode": live.mode}
+            tool_calls.append(
+                _tool_record(StripeLive.MIRROR_TOOL, 1, args, started, result.error if result.status == "failed" else None)
+            )
+            if result.status in ("mirrored", "duplicate"):
+                logs.append(_log(node, f"✓ Stripe test mode: refund {result.stripe_refund_id} on {result.payment_intent_id} ({result.status})"))
+            else:
+                logs.append(_log(node, f"Stripe mirror {result.status} (non-fatal): {result.error}"))
+            out.append({"local_refund_id": rec.refund_id, "transaction_id": rec.transaction_id, "amount": rec.amount,
+                        "currency": rec.currency, **result.as_dict()})
+        return out
 
     # ========================================================= RESPONSE DRAFTER
     def _facts(self, state: AgentState) -> dict[str, Any]:

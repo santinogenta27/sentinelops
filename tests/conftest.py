@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -10,6 +11,13 @@ from typing import Any
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Hermetic tests: real process env vars override the developer's .env. The suite must never reach
+# the real Stripe account, and Auto-Pilot is opted into explicitly by the tests that exercise it.
+os.environ["STRIPE_API_KEY"] = ""
+os.environ["AUTOPILOT_DEFAULT"] = "false"
+os.environ["ENABLE_EMAIL_LISTENER"] = "false"
+os.environ["ENABLE_EMAIL_SENDER"] = "false"
 
 from app.config import Settings  # noqa: E402
 from app.integrations.faults import FaultInjector  # noqa: E402

@@ -54,6 +54,10 @@ class AgentState(TypedDict):
     sender_email: Optional[str]  # address the request actually came from
     email_subject: Optional[str]
     email_message_id: Optional[str]
+    sender_alias_of: Optional[str]  # account email this sender is a verified alias of (operator-linked)
+
+    # --- Stripe live mirror (test mode) ------------------------------------
+    stripe_mirror: List[Dict[str, Any]]
 
 
 def initial_state(
@@ -66,8 +70,11 @@ def initial_state(
     sender_email: Optional[str] = None,
     email_subject: Optional[str] = None,
     email_message_id: Optional[str] = None,
+    sender_alias_of: Optional[str] = None,
 ) -> AgentState:
     return AgentState(
+        sender_alias_of=sender_alias_of,
+        stripe_mirror=[],
         channel=channel,
         inbound_source=inbound_source,
         sender_email=sender_email,

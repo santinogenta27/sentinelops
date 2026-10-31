@@ -49,6 +49,16 @@ class Repository:
             row = await cur.fetchone()
         return _customer(row) if row else None
 
+    async def get_customer_by_alias(self, email: str) -> CustomerRecord | None:
+        """Resolve an operator-verified alias address (see ``customer_aliases``) to its account."""
+        async with self.db.connect() as conn:
+            cur = await conn.execute(
+                "SELECT c.* FROM customer_aliases a JOIN customers c ON c.id = a.customer_id WHERE a.email = ?",
+                (email.lower(),),
+            )
+            row = await cur.fetchone()
+        return _customer(row) if row else None
+
     async def get_customer_by_id(self, customer_id: str) -> CustomerRecord | None:
         async with self.db.connect() as conn:
             cur = await conn.execute("SELECT * FROM customers WHERE id = ?", (customer_id,))

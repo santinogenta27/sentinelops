@@ -4,6 +4,11 @@ Polls a folder (or Gmail label) for UNSEEN mail whose subject matches the disput
 turns each one into a ticket and only then marks it \\Seen — so a crash between fetch and
 ingest never loses an email (re-ingest is idempotent through the Message-Id).
 Non-matching mail is left untouched (read with BODY.PEEK, never marked as read).
+
+One authenticated session is reused across polls (re-SELECT each poll so new mail is seen):
+logging in every few seconds gets throttled by Gmail. The session is dropped on any error and
+recycled every ``RECONNECT_AFTER_S``. The listener can be reconfigured and restarted at runtime
+(mailbox connected from the cockpit) without restarting the server.
 """
 
 from __future__ import annotations
@@ -12,6 +17,8 @@ import asyncio
 import imaplib
 import logging
 import re
+import threading
+import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -45,7 +52,17 @@ class ListenerStatus:
     recent: list[str] = field(default_factory=list)
 
 
+def _close_quietly(client: ImapClient) -> None:
+    try:
+        client.logout()
+    except Exception:  # noqa: BLE001 - best effort
+        pass
+
+
 class EmailListener:
+    RECONNECT_AFTER_S = 600.0
+    MAX_BATCH = 25
+
     def __init__(
         self,
         settings: Settings,
@@ -57,6 +74,9 @@ class EmailListener:
         self._factory = client_factory or self._default_client
         self._task: asyncio.Task[None] | None = None
         self.status = ListenerStatus(enabled=settings.enable_email_listener)
+        self._conn: ImapClient | None = None
+        self._conn_since = 0.0
+        self._conn_lock = threading.Lock()
 
     def _default_client(self) -> ImapClient:
         return imaplib.IMAP4_SSL(self.settings.imap_host, self.settings.imap_port, timeout=30)
@@ -78,51 +98,71 @@ class EmailListener:
                 return part[1]
         return None
 
-    def _poll_sync(self, loop: asyncio.AbstractEventLoop) -> int:
-        """Blocking IMAP session (runs in a worker thread). Returns the number of tickets created."""
-        user, password = self._credentials()
-        client = self._factory()
-        created = 0
-        try:
-            client.login(user, password)
-            status, _ = client.select(self.settings.imap_folder)
-            if status != "OK":
-                raise RuntimeError(f"cannot select folder {self.settings.imap_folder!r}")
-            status, data = client.uid("SEARCH", "UNSEEN")
-            if status != "OK":
-                raise RuntimeError("IMAP SEARCH failed")
-            uids = [u for u in (data[0] or b"").decode().split() if re.fullmatch(r"\d+", u)]
-            for uid in uids[:25]:  # bounded batch per poll
-                status, fetched = client.uid("FETCH", uid, "(BODY.PEEK[])")
-                raw = self._raw_message(fetched) if status == "OK" else None
-                if raw is None:
-                    continue
-                try:
-                    msg, email = parse_rfc822(raw)
-                except ValueError as exc:
-                    logger.warning("skipping unparseable message uid=%s: %s", uid, exc)
-                    self.status.skipped += 1
-                    continue
-                if is_auto_generated(msg) or not self._matches(email.subject):
-                    self.status.skipped += 1
-                    continue  # left UNSEEN for the humans
-                future = asyncio.run_coroutine_threadsafe(self._ingest(email), loop)
-                try:
-                    future.result(timeout=60)
-                except ValueError as exc:  # e.g. loop protection: leave it unread
-                    logger.info("not ingesting uid=%s: %s", uid, exc)
-                    self.status.skipped += 1
-                    continue
-                client.uid("STORE", uid, "+FLAGS", "(\\Seen)")
-                created += 1
-                self.status.recent = ([f"{email.from_address}: {email.subject}"] + self.status.recent)[:10]
-        finally:
+    # ------------------------------------------------------------- session
+    def _drop_connection(self) -> None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            _close_quietly(conn)
+
+    def _session(self) -> ImapClient:
+        if self._conn is not None and time.monotonic() - self._conn_since > self.RECONNECT_AFTER_S:
+            self._drop_connection()
+        if self._conn is None:
+            user, password = self._credentials()
+            client = self._factory()
             try:
-                client.logout()
-            except Exception:  # noqa: BLE001 - best effort
-                pass
+                client.login(user, password)
+            except Exception:
+                _close_quietly(client)
+                raise
+            self._conn, self._conn_since = client, time.monotonic()
+        return self._conn
+
+    def _poll_sync(self, loop: asyncio.AbstractEventLoop) -> int:
+        """Blocking IMAP poll (runs in a worker thread). Returns the number of tickets created."""
+        with self._conn_lock:
+            try:
+                return self._poll_session(self._session(), loop)
+            except Exception:
+                self._drop_connection()  # reconnect cleanly on the next poll
+                raise
+
+    def _poll_session(self, client: ImapClient, loop: asyncio.AbstractEventLoop) -> int:
+        created = 0
+        status, _ = client.select(self.settings.imap_folder)  # re-SELECT: the server reports new mail
+        if status != "OK":
+            raise RuntimeError(f"cannot select folder {self.settings.imap_folder!r}")
+        status, data = client.uid("SEARCH", "UNSEEN")
+        if status != "OK":
+            raise RuntimeError("IMAP SEARCH failed")
+        uids = [u for u in (data[0] or b"").decode().split() if re.fullmatch(r"\d+", u)]
+        for uid in uids[: self.MAX_BATCH]:  # bounded batch per poll
+            status, fetched = client.uid("FETCH", uid, "(BODY.PEEK[])")
+            raw = self._raw_message(fetched) if status == "OK" else None
+            if raw is None:
+                continue
+            try:
+                msg, email = parse_rfc822(raw)
+            except ValueError as exc:
+                logger.warning("skipping unparseable message uid=%s: %s", uid, exc)
+                self.status.skipped += 1
+                continue
+            if is_auto_generated(msg) or not self._matches(email.subject):
+                self.status.skipped += 1
+                continue  # left UNSEEN for the humans
+            future = asyncio.run_coroutine_threadsafe(self._ingest(email), loop)
+            try:
+                future.result(timeout=60)
+            except ValueError as exc:  # e.g. loop protection: leave it unread
+                logger.info("not ingesting uid=%s: %s", uid, exc)
+                self.status.skipped += 1
+                continue
+            client.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+            created += 1
+            self.status.recent = ([f"{email.from_address}: {email.subject}"] + self.status.recent)[:10]
         return created
 
+    # ---------------------------------------------------------------- loop
     async def poll_once(self) -> int:
         loop = asyncio.get_running_loop()
         try:
@@ -162,6 +202,18 @@ class EmailListener:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        await asyncio.to_thread(self._close_session)
+
+    def _close_session(self) -> None:
+        with self._conn_lock:
+            self._drop_connection()
+
+    async def restart(self) -> None:
+        """Apply new settings (e.g. a mailbox connected from the cockpit) without restarting uvicorn."""
+        await self.stop()
+        self.status = ListenerStatus(enabled=self.settings.enable_email_listener)
+        if self.status.enabled:
+            self.start()
 
     def describe(self) -> dict[str, object]:
         user = self.settings.imap_user or ""

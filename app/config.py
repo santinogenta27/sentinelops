@@ -61,6 +61,16 @@ class Settings(BaseSettings):
     smtp_user: str | None = None  # defaults to imap_user
     smtp_password: SecretStr | None = None  # defaults to imap_password
 
+    # --- Auto-Pilot (zero-touch) -------------------------------------------
+    # When ON, the HumanGate approves payouts that comply with policy (no injection, sender owns the
+    # account, risk not HIGH) up to ``autopilot_max_usd``. Everything else still waits for a human.
+    autopilot_default: bool = True  # initial value; the cockpit toggle persists the live value in the DB
+    autopilot_max_usd: float = Field(default=1000.0, ge=0, le=100_000)
+
+    # --- Stripe (live dashboard + test-mode mirror of ledger refunds) -------
+    stripe_api_key: SecretStr | None = None  # sk_test_... (writes are refused for live keys)
+    stripe_mirror_refunds: bool = True  # mirror each ledger refund into Stripe TEST mode
+
     # --- Storage ---
     data_dir: Path = PROJECT_ROOT / "data"
 
@@ -75,6 +85,11 @@ class Settings(BaseSettings):
         if not user or secret is None or not secret.get_secret_value():
             return None
         return user, secret.get_secret_value()
+
+    @property
+    def stripe_key(self) -> str | None:
+        key = self.stripe_api_key.get_secret_value().strip() if self.stripe_api_key else ""
+        return key or None
 
     @property
     def business_db_path(self) -> Path:

@@ -89,6 +89,7 @@ async def seed_database(db: Database, *, force: bool = False, now: datetime | No
         if force:
             for table in (
                 "refunds", "card_freezes", "crm_notes", "email_outbox", "supervisor_alerts", "inbound_emails",
+                "stripe_mirror", "stripe_charges",  # Stripe-side objects stay; only the local mapping resets
                 "ticket_events", "tickets", "transactions", "customers",
             ):
                 await conn.execute(f"DELETE FROM {table}")  # noqa: S608 - static table names

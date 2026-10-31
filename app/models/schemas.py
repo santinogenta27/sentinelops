@@ -306,6 +306,7 @@ class ChannelMeta(StrictModel):
     sender_email: str | None = None
     subject: Annotated[str, StringConstraints(max_length=500)] | None = None
     message_id: Annotated[str, StringConstraints(max_length=500)] | None = None
+    sender_alias_of: str | None = None  # set only when the sender is an operator-verified alias
 
 
 class TicketCreated(StrictModel):
@@ -350,6 +351,8 @@ class TicketView(BaseModel):
     inbound_source: str | None = None
     sender_email: str | None = None
     email_subject: str | None = None
+    reviewer: str | None = None
+    stripe_mirror: list[dict[str, object]] = Field(default_factory=list)
     next_nodes: list[str] = Field(default_factory=list)
     pending_interrupt: dict[str, object] | None = None
     created_at: str | None = None

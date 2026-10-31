@@ -24,7 +24,7 @@ cd C:\Users\usuario\sentinelops
 
 uvicorn app.main:app --reload --port 8000     # cockpit en http://127.0.0.1:8000
 pytest tests/eval_suite.py -v                  # suite de evaluación (gate de CI)
-pytest                                         # todo: unit + integración + API + email + eval (101 tests)
+pytest                                         # todo: unit + integración + API + email + eval (121 tests)
 mypy                                           # tipado estricto (--strict)
 ```
 
@@ -42,6 +42,8 @@ En bash: `export GEMINI_API_KEY=...`; en PowerShell: `$env:GEMINI_API_KEY="..."`
 | `HITL_THRESHOLD_USD` | `200` | Umbral de aprobación humana |
 | `JUDGE_PASS_THRESHOLD` | `0.85` | Score mínimo de fidelidad |
 | `MAX_TOOL_RETRIES` / `MAX_REDRAFTS` | `3` / `2` | Presupuestos de auto-corrección |
+| `AUTOPILOT_DEFAULT` / `AUTOPILOT_MAX_USD` | `true` / `1000` | Estado inicial del Auto-Pilot y techo de aprobación automática |
+| `STRIPE_API_KEY` / `STRIPE_MIRROR_REFUNDS` | — / `true` | Clave `sk_test_…` para el panel de Stripe y el espejo de reembolsos |
 
 ## Principios de diseño
 
@@ -120,6 +122,33 @@ Cockpit "📧 Send Live Test Email" ───────┘   (dedupe Message-I
 `ENABLE_EMAIL_SENDER=true`. Mandate un mail con asunto "Refund request" desde una cuenta de cliente del seed
 (o mencionando una en el cuerpo) y mirá cómo el cockpit lo levanta solo.
 
+## ⚡ Auto-Pilot, casilla conectada desde la UI y Stripe en vivo
+
+**Auto-Pilot (zero-touch).** El toggle **⚡ Auto-Pilot: ON/OFF** del header (persistido en la base) no saltea el
+`HumanGate`: el grafo igual se pausa con `interrupt()` (queda auditado). Lo que cambia es quién lo reanuda: si el caso
+cumple la política, lo reanuda el runtime con la decisión `auto-pilot`. Ejecuta el reembolso, lo replica en Stripe,
+pasa el LLM Judge y despacha la respuesta en ~4 s sin clics. **Sigue esperando a un humano** si hay:
+inyección de prompt · remitente que no es el dueño de la cuenta · riesgo ALTO (fraude, chargebacks, cuenta nueva) ·
+monto mayor que `AUTOPILOT_MAX_USD` · cualquier acción que no sea un reembolso simple. En esos casos aparecen el evento
+`autopilot_blocked` con los motivos y la alerta al supervisor.
+
+**⚙️ Conectar Casilla de Correo.** Modal con Gmail / Google Workspace, Outlook / Office 365 o IMAP personalizado, y una
+guía paso a paso para crear la App Password. **🧪 Probar Conexión** (`POST /api/email/test-connection`) hace login real por IMAP
+(y SMTP) sin guardar nada. **💾 Guardar y Activar** (`POST /api/email/save-config`) vuelve a verificar, guarda en
+`data/sentinelops.db` (fuera de git), aplica la config en caliente y reinicia el listener sin reiniciar uvicorn. El
+listener reutiliza una sola sesión IMAP (re-`SELECT` en cada poll), así Gmail no lo frena aunque escuche cada 5 s. El
+header muestra `🟢 Correo Activo: … (Escuchando en vivo cada 5s)` o `⚪ Correo no conectado`. La App Password nunca
+se devuelve por la API. *Modo demo:* opcionalmente vinculás tu email personal a un cliente del ledger (alias verificado)
+para probar el ciclo real completo: escribís desde Gmail, se reembolsa en Stripe y te llega la respuesta.
+
+**💳 Stripe Live Dashboard.** `GET /api/stripe/dashboard-sync` usa stripe-python para traer el balance, los reembolsos y los
+cobros reales. Cada reembolso del ledger se **replica en Stripe modo test**: se crea una vez el cobro original
+(tarjeta de prueba `pm_card_bypassPending`) y después el `Refund`, con idempotency key = id del reembolso local.
+Si Stripe falla, el ticket no falla: queda registrado como `failed` y visible. **Con una clave `sk_live_` el panel es
+sólo lectura**: SentinelOps nunca crea cobros ni reembolsos reales. Cuando el agente termina un reembolso de un email
+entrante, el cockpit salta solo a esta pestaña y resalta la fila nueva. Cada fila tiene **↗ Abrir en Stripe.com**.
+Nota: el balance de test puede quedar negativo, porque Stripe no devuelve su comisión al reembolsar.
+
 ## API
 
 | Método | Ruta | Descripción |
@@ -133,6 +162,9 @@ Cockpit "📧 Send Live Test Email" ───────┘   (dedupe Message-I
 | `POST` | `/api/admin/faults` · `/api/admin/reset` | Inyección de fallos (chaos) · re-seed del ledger |
 | `POST` | `/api/webhooks/inbound-email` · `/api/email/simulate` | Email entrante (proveedor, con token) · simulador del cockpit |
 | `GET`/`POST` | `/api/email/status` · `/api/inbox` · `/api/email/poll` | Estado del canal · emails recibidos · lectura IMAP inmediata |
+| `GET`/`POST` | `/api/email/config` · `/api/email/test-connection` · `/api/email/save-config` · `/api/email/disconnect` | Casilla conectada desde la UI (sin exponer la contraseña) |
+| `GET`/`PUT` | `/api/autopilot` | Estado del Auto-Pilot `{enabled, max_usd}` |
+| `GET` | `/api/stripe/dashboard-sync` | Balance + reembolsos + cobros de Stripe en tiempo real |
 
 Docs interactivas OpenAPI: `http://127.0.0.1:8000/docs`.
 

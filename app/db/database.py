@@ -118,6 +118,44 @@ CREATE TABLE IF NOT EXISTS supervisor_alerts (
     delivery TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+-- Operator-editable runtime settings (Auto-Pilot, mailbox connection). JSON values.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Verified extra addresses for a customer (e.g. a tester's real mailbox linked to a demo account).
+CREATE TABLE IF NOT EXISTS customer_aliases (
+    email TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- Original charge created in Stripe TEST mode for a ledger transaction (lazily, on first refund).
+CREATE TABLE IF NOT EXISTS stripe_charges (
+    transaction_id TEXT PRIMARY KEY,
+    payment_intent_id TEXT NOT NULL,
+    charge_id TEXT,
+    amount_cents INTEGER NOT NULL,
+    currency TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- One row per ledger refund mirrored into Stripe (never mirrored twice).
+CREATE TABLE IF NOT EXISTS stripe_mirror (
+    local_refund_id TEXT PRIMARY KEY,
+    ticket_id TEXT NOT NULL,
+    transaction_id TEXT NOT NULL,
+    amount REAL NOT NULL,
+    currency TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payment_intent_id TEXT,
+    stripe_refund_id TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL
+);
 """
 
 # Additive, idempotent column migrations for databases created by earlier versions.
@@ -261,6 +299,98 @@ class Database:
     async def list_supervisor_alerts(self, limit: int = 100) -> list[dict[str, object]]:
         async with self.connect() as conn:
             cur = await conn.execute("SELECT * FROM supervisor_alerts ORDER BY created_at DESC LIMIT ?", (limit,))
+            rows = await cur.fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+    # --- runtime settings -----------------------------------------------------
+    async def get_setting(self, key: str) -> object | None:
+        async with self.connect() as conn:
+            cur = await conn.execute("SELECT value_json FROM app_settings WHERE key = ?", (key,))
+            row = await cur.fetchone()
+        return json.loads(row["value_json"]) if row else None
+
+    async def set_setting(self, key: str, value: object) -> None:
+        async with self.connect() as conn:
+            await conn.execute(
+                "INSERT INTO app_settings (key, value_json, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+                (key, json.dumps(value), iso(utcnow())),
+            )
+            await conn.commit()
+
+    # --- customer aliases -----------------------------------------------------
+    async def set_customer_alias(self, email: str, customer_id: str) -> None:
+        async with self.connect() as conn:
+            await conn.execute(
+                "INSERT INTO customer_aliases (email, customer_id, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(email) DO UPDATE SET customer_id = excluded.customer_id",
+                (email.lower(), customer_id, iso(utcnow())),
+            )
+            await conn.commit()
+
+    async def delete_customer_alias(self, email: str) -> None:
+        async with self.connect() as conn:
+            await conn.execute("DELETE FROM customer_aliases WHERE email = ?", (email.lower(),))
+            await conn.commit()
+
+    async def list_customer_aliases(self) -> list[dict[str, object]]:
+        async with self.connect() as conn:
+            cur = await conn.execute(
+                "SELECT a.email, a.customer_id, c.email AS customer_email, c.name AS customer_name, a.created_at "
+                "FROM customer_aliases a LEFT JOIN customers c ON c.id = a.customer_id ORDER BY a.created_at DESC"
+            )
+            rows = await cur.fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+    # --- stripe mirror --------------------------------------------------------
+    async def get_stripe_charge(self, transaction_id: str) -> dict[str, object] | None:
+        async with self.connect() as conn:
+            cur = await conn.execute("SELECT * FROM stripe_charges WHERE transaction_id = ?", (transaction_id,))
+            row = await cur.fetchone()
+        return {k: row[k] for k in row.keys()} if row else None
+
+    async def save_stripe_charge(
+        self, *, transaction_id: str, payment_intent_id: str, charge_id: str | None, amount_cents: int, currency: str
+    ) -> None:
+        async with self.connect() as conn:
+            await conn.execute(
+                "INSERT OR REPLACE INTO stripe_charges (transaction_id, payment_intent_id, charge_id, amount_cents, currency, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (transaction_id, payment_intent_id, charge_id, amount_cents, currency, iso(utcnow())),
+            )
+            await conn.commit()
+
+    async def get_stripe_mirror(self, local_refund_id: str) -> dict[str, object] | None:
+        async with self.connect() as conn:
+            cur = await conn.execute("SELECT * FROM stripe_mirror WHERE local_refund_id = ?", (local_refund_id,))
+            row = await cur.fetchone()
+        return {k: row[k] for k in row.keys()} if row else None
+
+    async def save_stripe_mirror(
+        self,
+        *,
+        local_refund_id: str,
+        ticket_id: str,
+        transaction_id: str,
+        amount: float,
+        currency: str,
+        status: str,
+        payment_intent_id: str | None,
+        stripe_refund_id: str | None,
+        error: str | None,
+    ) -> None:
+        async with self.connect() as conn:
+            await conn.execute(
+                "INSERT OR REPLACE INTO stripe_mirror (local_refund_id, ticket_id, transaction_id, amount, currency, status, "
+                "payment_intent_id, stripe_refund_id, error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (local_refund_id, ticket_id, transaction_id, amount, currency, status, payment_intent_id,
+                 stripe_refund_id, error, iso(utcnow())),
+            )
+            await conn.commit()
+
+    async def list_stripe_mirror(self, limit: int = 100) -> list[dict[str, object]]:
+        async with self.connect() as conn:
+            cur = await conn.execute("SELECT * FROM stripe_mirror ORDER BY created_at DESC LIMIT ?", (limit,))
             rows = await cur.fetchall()
         return [{k: r[k] for k in r.keys()} for r in rows]
 

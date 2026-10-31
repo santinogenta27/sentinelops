@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SentinelOps Cockpit</title>
+<script src="https://cdn.tailwindcss.com/3.4.16"></script>
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<style>
+  :root { --bg:#0b0f17; --panel:#111827; --panel2:#0f1522; --line:#1f2937; --muted:#8b95a7; --text:#e5e7eb;
+          --accent:#6366f1; --ok:#10b981; --warn:#f59e0b; --bad:#ef4444; --info:#38bdf8; }
+  body { background:var(--bg); color:var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; }
+  .panel2 { background:var(--panel2); border:1px solid var(--line); border-radius:10px; }
+  .muted { color:var(--muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .pill { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; letter-spacing:.02em; white-space:nowrap; }
+  .scroll { scrollbar-width: thin; scrollbar-color:#334155 transparent; }
+  .node rect { fill:#0f1522; stroke:#334155; stroke-width:1.5; transition: all .25s; }
+  .node text { fill:#cbd5e1; font-size:12px; font-weight:600; }
+  .node .sub { fill:#64748b; font-size:9.5px; font-weight:500; }
+  .node.done rect { stroke:var(--ok); fill:#0c1f1a; }
+  .node.active rect { stroke:var(--accent); fill:#191a3a; animation: pulse 1.1s infinite; }
+  .node.paused rect { stroke:var(--warn); fill:#2a1f08; animation: pulse 1.4s infinite; }
+  .node.error rect { stroke:var(--bad); fill:#2a0f12; }
+  .edge { stroke:#334155; stroke-width:1.5; fill:none; transition: stroke .3s; }
+  .edge.hot { stroke:var(--accent); stroke-width:2.2; }
+  .edge.trav { stroke:#10b98199; }
+  .elabel { fill:#64748b; font-size:9px; }
+  @keyframes pulse { 0%,100% { filter: drop-shadow(0 0 0 rgba(99,102,241,0)); } 50% { filter: drop-shadow(0 0 8px rgba(99,102,241,.8)); } }
+  .tab.active { color:#fff; border-color:var(--accent); }
+  .logline { white-space: pre-wrap; word-break: break-word; }
+  .fade-in { animation: fade .25s ease-out; }
+  @keyframes fade { from { opacity:0; transform: translateY(3px);} to { opacity:1; transform:none; } }
+  textarea, input, select { background:#0b1220; border:1px solid #243041; border-radius:8px; color:var(--text); }
+  textarea:focus, input:focus, select:focus { outline:2px solid #4f46e5; outline-offset:0; }
+  button:focus-visible { outline:2px solid #818cf8; outline-offset:2px; }
+</style>
+</head>
+<body class="min-h-screen">
+<!-- ============================== HEADER ============================== -->
+<header class="border-b border-slate-800 bg-[#0d1220]/90 backdrop-blur sticky top-0 z-30">
+  <div class="max-w-[1680px] mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
+    <div class="flex items-center gap-2">
+      <div class="w-9 h-9 rounded-xl bg-indigo-600/20 border border-indigo-500/40 grid place-items-center"><i data-lucide="shield-check" class="w-5 h-5 text-indigo-300"></i></div>
+      <div>
+        <div class="font-bold tracking-tight text-[15px]">SentinelOps <span class="muted font-medium">Cockpit</span></div>
+        <div class="text-[11px] muted">Autonomous Financial Dispute Resolution · LangGraph + HITL</div>
+      </div>
+    </div>
+    <div class="flex-1"></div>
+    <div id="hdr-llm" class="pill bg-slate-800 text-slate-300"><i data-lucide="cpu" class="w-3 h-3"></i>LLM …</div>
+    <div id="hdr-rules" class="pill bg-slate-800 text-slate-300"></div>
+    <div id="hdr-sse" class="pill bg-slate-800 text-slate-300"><span class="w-2 h-2 rounded-full bg-slate-500"></span>stream</div>
+    <button id="btn-approvals" class="pill bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-amber-500/25 cursor-pointer">
+      <i data-lucide="user-check" class="w-3.5 h-3.5"></i>Approvals <span id="appr-count">0</span>
+    </button>
+  </div>
+</header>
+
+<main class="max-w-[1680px] mx-auto px-4 py-4 grid gap-4 grid-cols-1 xl:grid-cols-[340px_minmax(0,1fr)_minmax(0,1.05fr)]">
+  <!-- ============================== LEFT ============================== -->
+  <section class="flex flex-col gap-4 min-w-0">
+    <div class="panel p-4">
+      <div class="flex items-center gap-2 mb-3"><i data-lucide="inbox" class="w-4 h-4 text-indigo-300"></i><h2 class="font-semibold text-sm">New dispute ticket</h2></div>
+      <form id="ticket-form" class="flex flex-col gap-2">
+        <textarea id="f-msg" rows="5" required minlength="10" maxlength="6000" placeholder="Paste the customer complaint…" class="p-2.5 text-sm scroll"></textarea>
+        <input id="f-email" type="email" placeholder="Authenticated customer email (optional)" class="px-2.5 py-2 text-sm" />
+        <button class="mt-1 inline-flex justify-center items-center gap-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg py-2 text-sm font-semibold"><i data-lucide="play" class="w-4 h-4"></i>Run agent</button>
+      </form>
+      <div class="mt-4 text-[11px] uppercase tracking-wider muted mb-2">Scenarios</div>
+      <div id="scenarios" class="flex flex-col gap-1.5 max-h-[280px] overflow-auto scroll pr-1"></div>
+    </div>
+
+    <div class="panel p-4">
+      <div class="flex items-center gap-2 mb-2"><i data-lucide="zap-off" class="w-4 h-4 text-rose-300"></i><h2 class="font-semibold text-sm">Chaos / fault injection</h2></div>
+      <p class="text-[11px] muted mb-2">Arm failures for the next tool calls to watch self-correction (≤ 3 retries) or escalation.</p>
+      <div class="grid grid-cols-2 gap-1.5 text-xs">
+        <button data-fault='{"tool":"db.query_transactions","times":2,"kind":"timeout"}' class="fault panel2 px-2 py-1.5 hover:border-indigo-500">DB timeout ×2</button>
+        <button data-fault='{"tool":"db.query_transactions","times":4,"kind":"error"}' class="fault panel2 px-2 py-1.5 hover:border-rose-500">DB down ×4</button>
+        <button data-fault='{"tool":"stripe.create_refund","times":1,"kind":"error"}' class="fault panel2 px-2 py-1.5 hover:border-indigo-500">Stripe 503 ×1</button>
+        <button id="btn-reset" class="panel2 px-2 py-1.5 hover:border-amber-500">Reset ledger</button>
+      </div>
+      <div id="fault-msg" class="text-[11px] muted mt-2 min-h-[14px]"></div>
+    </div>
+
+    <div class="panel p-4 min-h-[200px]">
+      <div class="flex items-center gap-2 mb-2"><i data-lucide="list" class="w-4 h-4 text-indigo-300"></i><h2 class="font-semibold text-sm">Tickets</h2><div class="flex-1"></div><span id="tk-count" class="text-xs muted"></span></div>
+      <div id="tickets" class="flex flex-col gap-1.5 max-h-[420px] overflow-auto scroll pr-1"></div>
+    </div>
+  </section>
+
+  <!-- ============================== CENTER ============================== -->
+  <section class="flex flex-col gap-4 min-w-0">
+    <div class="panel p-4">
+      <div class="flex items-center gap-2 mb-1">
+        <i data-lucide="workflow" class="w-4 h-4 text-indigo-300"></i><h2 class="font-semibold text-sm">LangGraph execution</h2>
+        <div class="flex-1"></div><span id="graph-ticket" class="mono text-xs muted">no ticket selected</span>
+      </div>
+      <div class="flex gap-3 text-[10.5px] muted mb-1 flex-wrap">
+        <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm border border-indigo-500 bg-indigo-950"></span>running</span>
+        <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm border border-emerald-500 bg-emerald-950"></span>completed</span>
+        <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm border border-amber-500 bg-amber-950"></span>awaiting human</span>
+        <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm border border-rose-500 bg-rose-950"></span>error</span>
+      </div>
+      <svg id="graph" viewBox="0 0 460 760" class="w-full max-h-[760px]"></svg>
+    </div>
+  </section>
+
+  <!-- ============================== RIGHT ============================== -->
+  <section class="flex flex-col gap-4 min-w-0">
+    <div class="panel p-4">
+      <div class="flex items-center gap-1 border-b border-slate-800 mb-3 text-sm overflow-x-auto">
+        <button class="tab active px-3 py-2 border-b-2 border-transparent muted" data-tab="detail">Ticket</button>
+        <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="timeline">Timeline</button>
+        <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="tools">Tool calls</button>
+        <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="ledger">Ledger</button>
+        <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="evals">Evals</button>
+      </div>
+      <div id="tab-detail" class="tabpane"><div class="muted text-sm py-10 text-center">Select or run a ticket to inspect the agent's state.</div></div>
+      <div id="tab-timeline" class="tabpane hidden"><div id="timeline" class="mono text-[11.5px] leading-5 max-h-[720px] overflow-auto scroll"></div></div>
+      <div id="tab-tools" class="tabpane hidden"></div>
+      <div id="tab-ledger" class="tabpane hidden"></div>
+      <div id="tab-evals" class="tabpane hidden"></div>
+    </div>
+  </section>
+</main>
+
+<!-- ============================== HITL MODAL ============================== -->
+<div id="modal" class="fixed inset-0 z-50 hidden">
+  <div class="absolute inset-0 bg-black/70 backdrop-blur-sm" data-close></div>
+  <div class="relative max-w-2xl mx-auto mt-[6vh] panel p-5 fade-in max-h-[88vh] overflow-auto scroll">
+    <div class="flex items-start gap-3">
+      <div class="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/40 grid place-items-center shrink-0"><i data-lucide="hand" class="w-5 h-5 text-amber-300"></i></div>
+      <div class="flex-1 min-w-0">
+        <div class="text-xs muted">Human-in-the-Loop authorisation · LangGraph <span class="mono">interrupt()</span></div>
+        <h3 id="m-title" class="text-lg font-bold">Approval required</h3>
+      </div>
+      <button data-close class="muted hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <div id="m-body" class="mt-4 flex flex-col gap-3 text-sm"></div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">
+      <input id="m-reviewer" placeholder="Reviewer id (e.g. sup.maria)" class="px-2.5 py-2 text-sm" value="supervisor.ops" />
+      <input id="m-reason" placeholder="Reason (required to reject)" class="px-2.5 py-2 text-sm" />
+    </div>
+    <div id="m-err" class="text-rose-400 text-xs mt-2 min-h-[16px]"></div>
+    <div class="flex gap-2 mt-2 justify-end">
+      <button id="m-reject" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-rose-600/90 hover:bg-rose-500 text-sm font-semibold"><i data-lucide="x-circle" class="w-4 h-4"></i>Reject</button>
+      <button id="m-approve" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold"><i data-lucide="check-circle-2" class="w-4 h-4"></i>Authorise payout</button>
+    </div>
+  </div>
+</div>
+
+<!-- approvals drawer -->
+<div id="drawer" class="fixed inset-0 z-40 hidden">
+  <div class="absolute inset-0 bg-black/50" data-dclose></div>
+  <div class="absolute right-0 top-0 h-full w-full max-w-md panel rounded-none p-4 overflow-auto scroll fade-in">
+    <div class="flex items-center gap-2 mb-3"><i data-lucide="user-check" class="w-4 h-4 text-amber-300"></i><h3 class="font-semibold">Pending approvals</h3><div class="flex-1"></div><button data-dclose class="muted hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button></div>
+    <div id="drawer-list" class="flex flex-col gap-2"></div>
+  </div>
+</div>
+
+<div id="toasts" class="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 max-w-sm"></div>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------- utilities
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const money = (n) => n == null ? "—" : "$" + Number(n).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const icons = () => window.lucide && lucide.createIcons();
+async function api(path, opts = {}) {
+  const res = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts});
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : res.statusText);
+  return body;
+}
+function toast(msg, kind = "info") {
+  const colors = {info: "border-indigo-500/40", ok: "border-emerald-500/40", warn: "border-amber-500/40", bad: "border-rose-500/40"};
+  const el = document.createElement("div");
+  el.className = `panel px-3 py-2 text-sm fade-in border ${colors[kind] || colors.info}`;
+  el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.remove(), 4500);
+}
+const STATUS_STYLE = {
+  TRIAGING: "bg-sky-500/15 text-sky-300", INVESTIGATING: "bg-sky-500/15 text-sky-300", PLANNING: "bg-sky-500/15 text-sky-300",
+  EXECUTING: "bg-indigo-500/15 text-indigo-300", DRAFTING: "bg-indigo-500/15 text-indigo-300", AUDITING: "bg-indigo-500/15 text-indigo-300",
+  AWAITING_APPROVAL: "bg-amber-500/15 text-amber-300", EXECUTED: "bg-emerald-500/15 text-emerald-300",
+  REJECTED: "bg-rose-500/15 text-rose-300", ESCALATED: "bg-violet-500/15 text-violet-300", FAILED: "bg-rose-500/20 text-rose-300",
+};
+const statusPill = (s) => `<span class="pill ${STATUS_STYLE[s] || "bg-slate-700 text-slate-300"}">${esc(s)}</span>`;
+const RISK_STYLE = {LOW: "bg-emerald-500/15 text-emerald-300", MEDIUM: "bg-amber-500/15 text-amber-300", HIGH: "bg-rose-500/15 text-rose-300"};
+
+// ---------------------------------------------------------------- graph view
+const NODE_POS = {
+  triage: [230, 40, "TriageExtractor", "strict Pydantic extraction"],
+  db_inspector: [230, 120, "DBInspector", "SQL ledger · self-correction"],
+  policy_retriever: [230, 200, "PolicyRetriever", "Chroma + BM25 hybrid RAG"],
+  resolution_planner: [230, 280, "ResolutionPlanner", "findings · risk · plan"],
+  human_gate: [95, 375, "HumanGate", "interrupt() · HITL"],
+  action_executor: [230, 465, "ActionExecutor", "Mock Stripe · idempotent"],
+  response_drafter: [230, 550, "ResponseDrafter", "grounded customer email"],
+  llm_judge: [230, 635, "LLM_Judge_Audit", "faithfulness ≥ 0.85"],
+  dispatch: [230, 720, "Dispatch", "email + CRM · finalize"],
+};
+const W = 168, H = 46;
+const EDGE_PATHS = [
+  ["triage", "db_inspector", "M230 63 L230 97", ""],
+  ["db_inspector", "db_inspector", "M314 112 C 370 100, 370 140, 314 128", "retry ≤3"],
+  ["db_inspector", "policy_retriever", "M230 143 L230 177", ""],
+  ["policy_retriever", "resolution_planner", "M230 223 L230 257", ""],
+  ["resolution_planner", "db_inspector", "M146 280 C 60 270, 60 130, 146 120", "re-query"],
+  ["resolution_planner", "human_gate", "M190 303 L120 352", "> $200 / high risk"],
+  ["resolution_planner", "action_executor", "M260 303 C 300 360, 300 400, 250 442", "≤ $200 & low risk"],
+  ["human_gate", "action_executor", "M120 398 L200 442", "approved"],
+  ["human_gate", "response_drafter", "M60 398 C 30 470, 60 540, 146 550", "rejected"],
+  ["action_executor", "response_drafter", "M230 488 L230 527", ""],
+  ["response_drafter", "llm_judge", "M230 573 L230 612", ""],
+  ["llm_judge", "response_drafter", "M314 627 C 380 615, 380 560, 314 550", "< 0.85 re-draft"],
+  ["llm_judge", "dispatch", "M230 658 L230 697", "≥ 0.85"],
+];
+function drawGraph() {
+  const svg = $("#graph");
+  let s = `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+           <marker id="arrh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#818cf8"/></marker></defs>`;
+  s += `<text x="230" y="14" text-anchor="middle" class="elabel">[Incoming Ticket]</text><path class="edge" d="M230 18 L230 17" />`;
+  for (const [a, b, d, label] of EDGE_PATHS) {
+    s += `<path id="e-${a}-${b}" class="edge" d="${d}" marker-end="url(#arr)"/>`;
+    if (label) {
+      const nums = d.match(/-?\d+(\.\d+)?/g).map(Number);
+      const mx = (nums[0] + nums[nums.length - 2]) / 2, my = (nums[1] + nums[nums.length - 1]) / 2;
+      const off = a === b ? 52 : (a === "resolution_planner" && b === "db_inspector") ? -62 : (b === "response_drafter" && a === "human_gate") ? -40 : 0;
+      s += `<text x="${mx + off}" y="${my}" text-anchor="middle" class="elabel">${esc(label)}</text>`;
+    }
+  }
+  for (const [id, [x, y, title, sub]] of Object.entries(NODE_POS)) {
+    s += `<g class="node" id="n-${id}" transform="translate(${x - W / 2},${y - H / 2})"><rect width="${W}" height="${H}" rx="10"/>
+          <text x="${W / 2}" y="20" text-anchor="middle">${title}</text><text x="${W / 2}" y="35" text-anchor="middle" class="sub">${sub}</text></g>`;
+  }
+  svg.innerHTML = s;
+}
+function resetGraph() {
+  $$(".node").forEach(n => n.classList.remove("done", "active", "paused", "error"));
+  $$(".edge").forEach(e => { e.classList.remove("hot", "trav"); e.setAttribute("marker-end", "url(#arr)"); });
+}
+function markEdge(a, b, hot) {
+  const e = document.getElementById(`e-${a}-${b}`);
+  if (!e) return;
+  $$(".edge.hot").forEach(x => { x.classList.remove("hot"); x.classList.add("trav"); x.setAttribute("marker-end", "url(#arr)"); });
+  e.classList.add(hot ? "hot" : "trav");
+  if (hot) e.setAttribute("marker-end", "url(#arrh)");
+}
+function applyEventsToGraph(events) {
+  resetGraph();
+  let prev = null;
+  for (const ev of events) applyEventToGraph(ev, prev, false), prev = ev.type === "node_completed" ? ev.node : prev;
+  graphPrev = prev;
+}
+let graphPrev = null;
+function applyEventToGraph(ev, prev = graphPrev, live = true) {
+  const n = ev.node ? document.getElementById(`n-${ev.node}`) : null;
+  if (ev.type === "node_started" && n) {
+    $$(".node.active").forEach(x => x.classList.remove("active"));
+    n.classList.remove("done"); n.classList.add("active");
+    if (prev) markEdge(prev, ev.node, true);
+  } else if (ev.type === "node_completed" && n) {
+    n.classList.remove("active", "paused"); n.classList.add("done");
+    if (live) graphPrev = ev.node;
+  } else if (ev.type === "interrupt") {
+    const g = document.getElementById("n-human_gate");
+    g.classList.remove("active", "done"); g.classList.add("paused");
+    if (prev) markEdge(prev, "human_gate", true);
+  } else if (ev.type === "decision") {
+    document.getElementById("n-human_gate").classList.remove("paused");
+  } else if (ev.type === "run_error") {
+    $$(".node.active").forEach(x => { x.classList.remove("active"); x.classList.add("error"); });
+  } else if (ev.type === "run_completed") {
+    $$(".node.active").forEach(x => x.classList.remove("active"));
+  }
+}
+
+// ---------------------------------------------------------------- state
+let selected = null;
+let selectedEvents = [];
+let currentPending = null;
+
+async function loadHealth() {
+  try {
+    const h = await api("/api/health");
+    const llm = h.llm;
+    const degraded = String(llm.circuit).startsWith("open");
+    const label = llm.provider === "deterministic" ? "Deterministic engine" : `${llm.provider}:${llm.model}`;
+    $("#hdr-llm").className = `pill ${degraded ? "bg-amber-500/15 text-amber-300" : "bg-emerald-500/15 text-emerald-300"}`;
+    $("#hdr-llm").innerHTML = `<i data-lucide="cpu" class="w-3 h-3"></i>${esc(label)}${degraded ? " · degraded → fallback" : ""}`;
+    $("#hdr-llm").title = llm.circuit_reason || `circuit ${llm.circuit}, calls ${llm.calls_made}`;
+    $("#hdr-rules").innerHTML = `<i data-lucide="scale" class="w-3 h-3"></i>HITL &gt; ${money(h.hitl_threshold_usd)} · judge ≥ ${h.judge_pass_threshold} · retries ${h.max_tool_retries}`;
+    icons();
+  } catch (e) { /* ignore */ }
+}
+
+async function loadScenarios() {
+  const list = await api("/api/scenarios");
+  $("#scenarios").innerHTML = list.map(s => `
+    <button class="scn text-left panel2 px-2.5 py-2 hover:border-indigo-500 transition" data-key="${esc(s.key)}">
+      <div class="text-[12.5px] font-semibold">${esc(s.title)}</div>
+      <div class="text-[11px] muted">${esc(s.expectation)}</div>
+    </button>`).join("");
+  $$(".scn").forEach(b => b.onclick = async () => {
+    const s = list.find(x => x.key === b.dataset.key);
+    $("#f-msg").value = s.message; $("#f-email").value = s.customer_email || "";
+    await submitTicket(s.message, s.customer_email);
+  });
+}
+
+async function submitTicket(message, email) {
+  try {
+    const r = await api("/api/tickets", {method: "POST", body: JSON.stringify({message, customer_email: email || null})});
+    toast(`Ticket ${r.ticket_id} submitted`, "info");
+    await selectTicket(r.ticket_id, true);
+    loadTickets();
+  } catch (e) { toast("Submit failed: " + e.message, "bad"); }
+}
+$("#ticket-form").onsubmit = (ev) => { ev.preventDefault(); submitTicket($("#f-msg").value.trim(), $("#f-email").value.trim()); };
+
+async function loadTickets() {
+  const list = await api("/api/tickets?limit=100");
+  $("#tk-count").textContent = list.length ? `${list.length}` : "";
+  $("#tickets").innerHTML = list.length ? list.map(t => `
+    <button class="tk text-left panel2 px-2.5 py-2 hover:border-indigo-500 transition ${t.ticket_id === selected ? "border-indigo-500" : ""}" data-id="${esc(t.ticket_id)}">
+      <div class="flex items-center gap-2"><span class="mono text-[11px] text-indigo-300">${esc(t.ticket_id)}</span><div class="flex-1"></div>${statusPill(t.execution_status)}</div>
+      <div class="text-[11.5px] muted truncate mt-1">${esc(t.raw_message)}</div>
+      <div class="flex gap-1.5 mt-1 flex-wrap text-[10.5px]">
+        ${t.claim_category ? `<span class="pill bg-slate-800 text-slate-300">${esc(t.claim_category)}</span>` : ""}
+        ${t.payout_total ? `<span class="pill bg-slate-800 text-slate-200">${money(t.payout_total)}</span>` : ""}
+        ${t.risk_level ? `<span class="pill ${RISK_STYLE[t.risk_level]}">${esc(t.risk_level)}</span>` : ""}
+        ${t.injection ? `<span class="pill bg-rose-500/15 text-rose-300">injection</span>` : ""}
+      </div>
+    </button>`).join("") : `<div class="muted text-xs py-4 text-center">No tickets yet — run a scenario.</div>`;
+  $$(".tk").forEach(b => b.onclick = () => selectTicket(b.dataset.id));
+}
+
+async function loadApprovals() {
+  const list = await api("/api/approvals");
+  $("#appr-count").textContent = list.length;
+  $("#drawer-list").innerHTML = list.length ? list.map(t => {
+    const p = t.pending_interrupt || {};
+    return `<div class="panel2 p-3">
+      <div class="flex items-center gap-2"><span class="mono text-xs text-indigo-300">${esc(t.ticket_id)}</span><div class="flex-1"></div><span class="font-bold">${money(p.amount)}</span></div>
+      <div class="text-xs muted mt-1 line-clamp-2">${esc(t.raw_message)}</div>
+      <div class="flex gap-1 mt-2">${t.risk ? `<span class="pill ${RISK_STYLE[t.risk.level]}">${esc(t.risk.level)} risk</span>` : ""}${(t.injection_signals || []).length ? `<span class="pill bg-rose-500/15 text-rose-300">injection</span>` : ""}</div>
+      <button class="rev mt-2 w-full bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-lg py-1.5 text-sm font-semibold" data-id="${esc(t.ticket_id)}">Review</button>
+    </div>`;
+  }).join("") : `<div class="muted text-sm py-8 text-center">Nothing awaiting approval.</div>`;
+  $$(".rev").forEach(b => b.onclick = async () => { $("#drawer").classList.add("hidden"); await selectTicket(b.dataset.id); openModal(); });
+}
+$("#btn-approvals").onclick = () => { loadApprovals(); $("#drawer").classList.remove("hidden"); };
+$$("[data-dclose]").forEach(x => x.onclick = () => $("#drawer").classList.add("hidden"));
+
+// ---------------------------------------------------------------- ticket detail
+async function selectTicket(id, fresh = false) {
+  selected = id;
+  $("#graph-ticket").textContent = id;
+  selectedEvents = fresh ? [] : await api(`/api/tickets/${id}/events`).catch(() => []);
+  applyEventsToGraph(selectedEvents);
+  renderTimeline();
+  await refreshDetail();
+  $$(".tk").forEach(b => b.classList.toggle("border-indigo-500", b.dataset.id === id));
+}
+
+let detailTimer = null;
+function scheduleDetail() { clearTimeout(detailTimer); detailTimer = setTimeout(refreshDetail, 150); }
+
+function kv(label, value) { return `<div class="panel2 px-2.5 py-2 min-w-0"><div class="text-[10.5px] uppercase tracking-wider muted">${label}</div><div class="text-sm font-semibold truncate">${value}</div></div>`; }
+
+async function refreshDetail() {
+  if (!selected) return;
+  let t;
+  try { t = await api(`/api/tickets/${selected}`); } catch { return; }
+  currentPending = t.pending_interrupt;
+  const action = t.resolution_action || {};
+  const risk = t.risk;
+  const verdict = t.judge_verdict;
+  const receipt = t.execution_receipt;
+  const refunds = action.refunds || [];
+  const total = refunds.reduce((a, r) => a + r.amount, 0);
+  let h = `
+    <div class="flex items-center gap-2 flex-wrap mb-3">
+      <span class="mono text-indigo-300">${esc(t.ticket_id)}</span>${statusPill(t.execution_status)}
+      ${t.requires_human_approval ? `<span class="pill bg-amber-500/15 text-amber-300"><i data-lucide="hand" class="w-3 h-3"></i>HITL</span>` : ""}
+      ${t.human_approved === true ? `<span class="pill bg-emerald-500/15 text-emerald-300">approved</span>` : t.human_approved === false ? `<span class="pill bg-rose-500/15 text-rose-300">rejected</span>` : ""}
+      <div class="flex-1"></div>
+      ${t.pending_interrupt ? `<button id="open-modal" class="pill bg-amber-500 text-black hover:bg-amber-400 cursor-pointer"><i data-lucide="user-check" class="w-3 h-3"></i>Review now</button>` : ""}
+    </div>
+    <div class="panel2 p-3 text-[12.5px] mb-3 whitespace-pre-wrap max-h-28 overflow-auto scroll"><span class="muted text-[10.5px] uppercase tracking-wider block mb-1">Customer message (untrusted)</span>${esc(t.raw_message)}</div>
+    ${(t.injection_signals || []).length ? `<div class="mb-3 px-3 py-2 rounded-lg border border-rose-500/40 bg-rose-500/10 text-rose-200 text-xs flex gap-2 items-start"><i data-lucide="shield-alert" class="w-4 h-4 shrink-0"></i><div><b>Prompt injection detected:</b> ${esc(t.injection_signals.join(", "))}. Message treated as hostile data; payout derived from ledger only; human approval forced.</div></div>` : ""}
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+      ${kv("Category", esc(t.claim_category || "—"))}
+      ${kv("Customer", esc(t.customer_email || "—"))}
+      ${kv("Tier", esc(t.customer_tier || "—"))}
+      ${kv("Claimed", money(t.dispute_amount))}
+      ${kv("Action", esc(action.action_type || "—"))}
+      ${kv("Payout", refunds.length ? money(total) : "—")}
+      ${kv("Risk", risk ? `<span class="pill ${RISK_STYLE[risk.level]}">${esc(risk.level)} · ${risk.score}</span>` : "—")}
+      ${kv("Tool errors", `${t.tool_error_count}`)}
+    </div>`;
+  if (risk && risk.flags.length) h += `<div class="flex flex-wrap gap-1 mb-3">${risk.flags.map(f => `<span class="pill bg-slate-800 text-slate-300 mono">${esc(f)}</span>`).join("")}</div>`;
+  if (t.findings.length) h += `<div class="mb-3"><div class="text-[10.5px] uppercase tracking-wider muted mb-1">Findings</div><div class="flex flex-col gap-1">${t.findings.map(f => `<div class="text-xs panel2 px-2.5 py-1.5"><span class="pill bg-indigo-500/15 text-indigo-300 mr-1">${esc(f.kind)}</span>${esc(f.detail)}</div>`).join("")}</div></div>`;
+  if (action.action_type) h += `<div class="mb-3"><div class="text-[10.5px] uppercase tracking-wider muted mb-1">Resolution plan</div><div class="panel2 p-2.5 text-xs">
+      <div><b>${esc(action.action_type)}</b> · <span class="mono">${esc(action.reason_code)}</span> · policies ${action.policy_refs.map(p => `<span class="mono text-indigo-300">${esc(p)}</span>`).join(", ") || "—"}</div>
+      ${refunds.map(r => `<div class="mono mt-1">↳ refund ${money(r.amount)} on ${esc(r.transaction_id)}</div>`).join("")}
+      ${action.secondary_actions.length ? `<div class="mt-1 muted">secondary: ${esc(action.secondary_actions.join(", "))}</div>` : ""}
+    </div></div>`;
+  if (t.investigation_summary) h += `<div class="mb-3"><div class="text-[10.5px] uppercase tracking-wider muted mb-1">Investigation summary</div><div class="panel2 p-2.5 text-xs whitespace-pre-wrap">${esc(t.investigation_summary)}</div></div>`;
+  if (receipt) h += `<div class="mb-3"><div class="text-[10.5px] uppercase tracking-wider muted mb-1">Execution receipt (Mock Stripe)</div><div class="panel2 p-2.5 text-xs mono">
+      ${receipt.refunds.map(r => `<div>✓ ${esc(r.refund_id)} · ${money(r.amount)} · ${esc(r.transaction_id)} · ${esc(r.status)}</div>`).join("") || "<div class='muted'>no money moved</div>"}
+      <div class="muted mt-1">${esc(receipt.note)}${receipt.secondary_actions_done.length ? " · " + esc(receipt.secondary_actions_done.join(", ")) : ""}</div></div></div>`;
+  if (verdict) h += `<div class="mb-3"><div class="text-[10.5px] uppercase tracking-wider muted mb-1">LLM-as-a-Judge audit</div><div class="panel2 p-2.5 text-xs">
+      <div class="flex items-center gap-2 mb-1"><span class="pill ${verdict.passed ? "bg-emerald-500/15 text-emerald-300" : "bg-rose-500/15 text-rose-300"}">${verdict.passed ? "PASSED" : "FAILED"}</span>
+      <div class="flex-1 h-1.5 rounded bg-slate-800 overflow-hidden"><div class="h-full ${verdict.faithfulness_score >= 0.85 ? "bg-emerald-500" : "bg-rose-500"}" style="width:${Math.round(verdict.faithfulness_score * 100)}%"></div></div>
+      <span class="mono">${Number(verdict.faithfulness_score).toFixed(2)}</span></div><div class="muted">${esc(verdict.feedback)}</div></div></div>`;
+  if (t.customer_response_draft) h += `<div class="mb-3"><div class="text-[10.5px] uppercase tracking-wider muted mb-1">Customer email ${t.execution_status === "EXECUTED" || t.execution_status === "REJECTED" || t.execution_status === "ESCALATED" ? "(dispatched)" : "(draft)"}</div><div class="panel2 p-3 text-[12.5px] whitespace-pre-wrap">${esc(t.customer_response_draft)}</div></div>`;
+  if (t.policy_clauses.length) h += `<details class="mb-1"><summary class="text-[10.5px] uppercase tracking-wider muted cursor-pointer">Retrieved policy clauses (${t.policy_clauses.length})</summary><div class="flex flex-col gap-1 mt-1">${t.policy_clauses.map(c => `<div class="panel2 p-2 text-[11.5px]">${esc(c)}</div>`).join("")}</div></details>`;
+  $("#tab-detail").innerHTML = h;
+  const ob = $("#open-modal"); if (ob) ob.onclick = openModal;
+  renderTools(t.tool_calls);
+  icons();
+}
+
+function renderTools(calls) {
+  $("#tab-tools").innerHTML = calls.length ? `<div class="overflow-x-auto"><table class="w-full text-xs"><thead class="muted text-left"><tr><th class="py-1 pr-2">#</th><th class="pr-2">tool</th><th class="pr-2">attempt</th><th class="pr-2">result</th><th class="pr-2">ms</th><th>arguments / error</th></tr></thead><tbody>
+    ${calls.map((c, i) => `<tr class="border-t border-slate-800 align-top"><td class="py-1.5 pr-2 muted">${i + 1}</td><td class="pr-2 mono">${esc(c.tool)}</td><td class="pr-2">${c.attempt}</td>
+      <td class="pr-2">${c.success ? `<span class="pill bg-emerald-500/15 text-emerald-300">ok</span>` : `<span class="pill bg-rose-500/15 text-rose-300">error</span>`}</td><td class="pr-2 mono">${c.duration_ms}</td>
+      <td class="mono text-[10.5px] break-all">${esc(JSON.stringify(c.arguments))}${c.error ? `<div class="text-rose-300 mt-0.5">${esc(c.error)}</div>` : ""}</td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="muted text-sm py-6 text-center">No tool calls yet.</div>`;
+}
+
+function renderTimeline() {
+  const lines = [];
+  for (const ev of selectedEvents) {
+    const ts = (ev.ts || "").slice(11, 19);
+    if (ev.type === "node_completed") {
+      for (const l of (ev.payload?.delta?.logs || [])) lines.push(`<div class="logline fade-in"><span class="text-slate-500">${esc(l.slice(0, 8))}</span> ${colorLog(l.slice(9))}</div>`);
+    } else if (ev.type === "node_started") {
+      lines.push(`<div class="logline text-slate-500">${esc(ts)} ▶ ${esc(ev.node)}</div>`);
+    } else if (ev.type === "interrupt") {
+      lines.push(`<div class="logline text-amber-300">${esc(ts)} ⏸ graph interrupted at human_gate — awaiting supervisor</div>`);
+    } else if (ev.type === "decision") {
+      lines.push(`<div class="logline text-amber-200">${esc(ts)} ⏵ decision received: ${ev.payload.approved ? "APPROVED" : "REJECTED"} by ${esc(ev.payload.reviewer)}</div>`);
+    } else if (ev.type === "run_completed") {
+      lines.push(`<div class="logline text-emerald-300">${esc(ts)} ■ run completed → ${esc(ev.payload.status)}</div>`);
+    } else if (ev.type === "run_error") {
+      lines.push(`<div class="logline text-rose-300">${esc(ts)} ✗ ${esc(ev.payload.error)}</div>`);
+    } else if (ev.type === "ticket_created") {
+      lines.push(`<div class="logline text-indigo-300">${esc(ts)} ● ticket created</div>`);
+    }
+  }
+  $("#timeline").innerHTML = lines.join("") || `<div class="muted text-sm py-6 text-center font-sans">No events yet.</div>`;
+  const tl = $("#timeline"); tl.scrollTop = tl.scrollHeight;
+}
+function colorLog(l) {
+  let s = esc(l).replace(/^\[([a-z_]+)\]/, '<span class="text-indigo-300">[$1]</span>');
+  if (/✗|⛔|⚠|dropped|exhausted/.test(l)) s = `<span class="text-rose-300">${s}</span>`;
+  else if (/HUMAN APPROVAL|re-draft|re-query|self-correction/.test(l)) s = `<span class="text-amber-200">${s}</span>`;
+  else if (/✓/.test(l)) s = `<span class="text-emerald-200">${s}</span>`;
+  return s;
+}
+
+// ---------------------------------------------------------------- HITL modal
+function openModal() {
+  const p = currentPending;
+  if (!p) return;
+  const a = p.action || {};
+  const risk = p.risk || {};
+  $("#m-title").textContent = p.question || "Approval required";
+  $("#m-body").innerHTML = `
+    <div class="grid grid-cols-3 gap-2">
+      ${kv("Ticket", `<span class="mono text-indigo-300">${esc(p.ticket_id)}</span>`)}
+      ${kv("Payout", `<span class="text-xl">${money(p.amount)}</span>`)}
+      ${kv("Risk", risk.level ? `<span class="pill ${RISK_STYLE[risk.level]}">${esc(risk.level)} · ${risk.score}</span>` : "—")}
+    </div>
+    ${(p.injection_signals || []).length ? `<div class="px-3 py-2 rounded-lg border border-rose-500/40 bg-rose-500/10 text-rose-200 text-xs"><b>⚠ Manipulation attempt:</b> ${esc(p.injection_signals.join(", "))}</div>` : ""}
+    ${(risk.flags || []).length ? `<div class="flex flex-wrap gap-1">${risk.flags.map(f => `<span class="pill bg-slate-800 text-slate-300 mono">${esc(f)}</span>`).join("")}</div>` : ""}
+    <div class="panel2 p-2.5 text-xs"><b>${esc(a.action_type)}</b> · <span class="mono">${esc(a.reason_code)}</span>
+      ${(a.refunds || []).map(r => `<div class="mono mt-1">↳ ${money(r.amount)} on ${esc(r.transaction_id)}</div>`).join("")}
+      ${(a.secondary_actions || []).length ? `<div class="muted mt-1">secondary: ${esc(a.secondary_actions.join(", "))}</div>` : ""}
+      <div class="muted mt-1">policies: ${esc((a.policy_refs || []).join(", "))}</div></div>
+    <div class="panel2 p-2.5 text-xs whitespace-pre-wrap max-h-48 overflow-auto scroll">${esc(p.investigation_summary)}</div>`;
+  $("#m-err").textContent = "";
+  $("#modal").classList.remove("hidden");
+  icons();
+}
+function closeModal() { $("#modal").classList.add("hidden"); }
+$$("[data-close]").forEach(x => x.onclick = closeModal);
+async function decide(approved) {
+  const reviewer = $("#m-reviewer").value.trim();
+  const reason = $("#m-reason").value.trim();
+  if (!approved && !reason) { $("#m-err").textContent = "A reason is required to reject."; return; }
+  try {
+    await api(`/api/tickets/${currentPending.ticket_id}/decision`, {method: "POST", body: JSON.stringify({approved, reviewer, reason: reason || null})});
+    closeModal(); $("#m-reason").value = "";
+    toast(approved ? "Payout authorised — resuming graph" : "Rejected — resuming graph", approved ? "ok" : "warn");
+  } catch (e) { $("#m-err").textContent = e.message; }
+}
+$("#m-approve").onclick = () => decide(true);
+$("#m-reject").onclick = () => decide(false);
+
+// ---------------------------------------------------------------- tabs
+$$(".tab").forEach(t => t.onclick = () => {
+  $$(".tab").forEach(x => x.classList.toggle("active", x === t));
+  $$(".tabpane").forEach(p => p.classList.toggle("hidden", p.id !== `tab-${t.dataset.tab}`));
+  if (t.dataset.tab === "ledger") loadLedger();
+  if (t.dataset.tab === "evals") loadEvals();
+});
+
+async function loadLedger() {
+  const l = await api("/api/ledger");
+  $("#tab-ledger").innerHTML = `
+    <div class="text-[10.5px] uppercase tracking-wider muted mb-1">Mock Stripe refunds (${l.refunds.length})</div>
+    <div class="overflow-x-auto mb-4"><table class="w-full text-xs"><thead class="muted text-left"><tr><th class="py-1 pr-2">refund</th><th class="pr-2">charge</th><th class="pr-2">amount</th><th class="pr-2">ticket</th><th>approved by</th></tr></thead><tbody>
+    ${l.refunds.map(r => `<tr class="border-t border-slate-800"><td class="py-1.5 pr-2 mono">${esc(r.id)}</td><td class="pr-2 mono">${esc(r.transaction_id)}</td><td class="pr-2">${money(r.amount)}</td><td class="pr-2 mono text-indigo-300">${esc(r.ticket_id)}</td><td>${esc(r.approved_by)}</td></tr>`).join("") || `<tr><td colspan="5" class="muted py-3">No refunds yet</td></tr>`}
+    </tbody></table></div>
+    <div class="text-[10.5px] uppercase tracking-wider muted mb-1">Email outbox (${l.outbox.length})</div>
+    <div class="flex flex-col gap-2">${l.outbox.map(m => `<details class="panel2 p-2.5 text-xs"><summary class="cursor-pointer"><span class="mono text-indigo-300">${esc(m.ticket_id)}</span> → ${esc(m.to_address || "unknown")} · <b>${esc(m.subject)}</b></summary><div class="whitespace-pre-wrap mt-2">${esc(m.body)}</div></details>`).join("") || `<div class="muted text-xs">Empty</div>`}</div>`;
+}
+
+async function loadEvals() {
+  const r = await api("/api/eval/report");
+  if (!r.available) { $("#tab-evals").innerHTML = `<div class="muted text-sm py-6 text-center">No evaluation report yet.<br/><span class="mono text-xs">pytest tests/eval_suite.py -v</span></div>`; return; }
+  const m = r.metrics;
+  const tile = (label, v, good, fmt = (x) => (x * 100).toFixed(1) + "%") => `<div class="panel2 p-3"><div class="text-[10.5px] uppercase tracking-wider muted">${label}</div><div class="text-2xl font-bold ${good ? "text-emerald-300" : "text-rose-300"}">${fmt(v)}</div></div>`;
+  $("#tab-evals").innerHTML = `
+    <div class="text-xs muted mb-2">Run ${esc(r.generated_at)} · provider <span class="mono">${esc(r.provider)}</span> · ${r.cases} cases</div>
+    <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-3">
+      ${tile("Tool precision", m.tool_precision, m.tool_precision >= r.thresholds.tool_precision)}
+      ${tile("Tool recall", m.tool_recall, m.tool_recall >= r.thresholds.tool_recall)}
+      ${tile("Hallucination rate", m.hallucination_rate, m.hallucination_rate <= r.thresholds.hallucination_rate)}
+      ${tile("Injection defense", m.injection_defense_rate, m.injection_defense_rate >= r.thresholds.injection_defense_rate)}
+      ${tile("HITL gate accuracy", m.hitl_gate_accuracy, m.hitl_gate_accuracy >= r.thresholds.hitl_gate_accuracy)}
+      ${tile("Action accuracy", m.action_accuracy, m.action_accuracy >= r.thresholds.action_accuracy)}
+    </div>
+    <div class="overflow-x-auto"><table class="w-full text-xs"><thead class="muted text-left"><tr><th class="py-1 pr-2">case</th><th class="pr-2">status</th><th class="pr-2">action</th><th class="pr-2">payout</th><th class="pr-2">judge</th><th>pass</th></tr></thead><tbody>
+    ${r.results.map(c => `<tr class="border-t border-slate-800"><td class="py-1.5 pr-2 mono">${esc(c.case_id)}</td><td class="pr-2">${statusPill(c.final_status)}</td><td class="pr-2">${esc(c.action_type)}</td><td class="pr-2">${money(c.payout)}</td><td class="pr-2 mono">${c.judge_score ?? "—"}</td><td>${c.passed ? "✅" : "❌"}</td></tr>`).join("")}
+    </tbody></table></div>`;
+}
+
+// ---------------------------------------------------------------- faults
+$$(".fault").forEach(b => b.onclick = async () => {
+  const body = JSON.parse(b.dataset.fault);
+  await api("/api/admin/faults", {method: "POST", body: JSON.stringify(body)});
+  $("#fault-msg").textContent = `Armed: ${body.tool} → ${body.kind} ×${body.times}. Run a ticket now.`;
+  toast(`Fault armed on ${body.tool}`, "warn");
+});
+$("#btn-reset").onclick = async () => { await api("/api/admin/reset", {method: "POST"}); toast("Ledger re-seeded", "info"); loadTickets(); $("#fault-msg").textContent = ""; };
+
+// ---------------------------------------------------------------- SSE
+function connectSSE() {
+  const es = new EventSource("/api/stream");
+  const dot = (c, t) => $("#hdr-sse").innerHTML = `<span class="w-2 h-2 rounded-full ${c}"></span>${t}`;
+  es.onopen = () => dot("bg-emerald-400", "live");
+  es.onerror = () => dot("bg-rose-400", "reconnecting");
+  const handle = (msg) => {
+    const ev = JSON.parse(msg.data);
+    if (ev.ticket_id === selected) {
+      selectedEvents.push(ev);
+      applyEventToGraph(ev);
+      renderTimeline();
+      scheduleDetail();
+      if (ev.type === "interrupt") setTimeout(async () => { await refreshDetail(); openModal(); }, 250);
+    }
+    if (["run_completed", "paused", "run_error", "ticket_created"].includes(ev.type)) { loadTickets(); loadApprovals(); loadHealth(); }
+    if (ev.type === "interrupt" && ev.ticket_id !== selected) toast(`${ev.ticket_id} needs approval (${money(ev.payload.request.amount)})`, "warn");
+    if (ev.type === "run_completed" && ev.ticket_id === selected) toast(`${ev.ticket_id} → ${ev.payload.status}`, ev.payload.status === "EXECUTED" ? "ok" : "info");
+  };
+  ["ticket_created", "node_started", "node_completed", "interrupt", "paused", "decision", "run_completed", "run_error"].forEach(t => es.addEventListener(t, handle));
+}
+
+// ---------------------------------------------------------------- boot
+drawGraph(); icons();
+loadHealth(); loadScenarios(); loadTickets(); loadApprovals(); connectSSE();
+setInterval(loadHealth, 30000);
+</script>
+</body>
+</html>

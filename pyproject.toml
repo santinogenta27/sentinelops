@@ -1,0 +1,29 @@
+[project]
+name = "sentinelops"
+version = "1.0.0"
+description = "Enterprise Autonomous Financial Dispute & Agentic Resolution Engine"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "eval_suite.py"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["app"]
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = false
+
+[[tool.mypy.overrides]]
+module = ["rank_bm25.*", "chromadb.*"]
+ignore_missing_imports = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true

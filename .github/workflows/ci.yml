@@ -1,0 +1,48 @@
+name: SentinelOps CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    env:
+      LLM_PROVIDER: mock          # deterministic, reproducible CI gate (no secrets needed)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Type check (mypy --strict)
+        run: mypy
+      - name: Unit + integration + API tests
+        run: pytest tests/test_units.py tests/test_graph.py tests/test_api.py -v
+      - name: Agent evaluation suite (CI gate)
+        run: pytest tests/eval_suite.py -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: reports/eval_report.json
+
+  live-eval:
+    # Optional: runs the same golden set against the real LLM when the secret exists.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    env:
+      LLM_PROVIDER: gemini
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      EVAL_LIVE: "1"
+      LLM_RPM: "8"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: pytest tests/eval_suite.py -v

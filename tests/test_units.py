@@ -214,6 +214,12 @@ class TestEngine:
         assert not inflated_amount_requested(txns, [120.0, 50.0])  # partial refund mentioned, smaller than the charge
         assert not inflated_amount_requested(txns, [75.0])  # misremembered amount, no ledger charge cited
 
+    @pytest.mark.parametrize("kw", [{"chargeback_count": 3}, {"account_created_at": NOW - timedelta(days=3)}])
+    def test_risky_account_alone_is_high_risk(self, kw: dict[str, object]) -> None:
+        r = assess_risk(customer=cust(**kw), findings=[], category="DUPLICATE_CHARGE", injection_signals=[], payout_total=25,
+                        hitl_threshold=200, now=NOW)
+        assert r.level == "HIGH"
+
     def test_risk_high_for_fraud_and_injection(self) -> None:
         r = assess_risk(customer=cust(), findings=[], category="FRAUD_CLAIM", injection_signals=[], payout_total=10,
                         hitl_threshold=200, now=NOW)

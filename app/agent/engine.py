@@ -247,11 +247,12 @@ def assess_risk(
         score += 0.6
         flags.append("prompt_injection:" + ",".join(injection_signals))
     if customer is not None:
+        # POL-FRD-002: either condition alone makes the account HIGH risk, so any payout needs a human.
         if customer.chargeback_count >= 3:
-            score += 0.4
+            score += 0.6
             flags.append(f"chargeback_history:{customer.chargeback_count}")
         if now - customer.account_created_at < timedelta(days=7):
-            score += 0.3
+            score += 0.6
             flags.append("new_account_lt_7d")
         if customer.account_status != "ACTIVE":
             score += 0.4

@@ -16,6 +16,18 @@ _INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("approval_bypass", r"\b(skip|bypass|circumvent|disable|without)\b[^.\n]{0,30}\b(approval|human|review|verification|supervisor|checks?)\b"),
         ("markup_injection", r"(<\s*/?\s*(system|assistant|instructions?)\s*>|\[/?INST\]|###\s*(system|instruction)|```\s*system)"),
         ("tool_coercion", r"\b(call|execute|invoke|run)\b[^.\n]{0,20}\b(tool|function|stripe|refund api|create_refund)\b"),
+        # Text imitating the structure of a chat/system message: role keys in JSON/YAML/kwargs, chat
+        # template tokens, bracketed role tags, and transcript-style "System:"/"Assistant:" turns.
+        # Requires the role word to be directly followed by ":" so prose like "System error: ..." or
+        # "my system shows ..." is not flagged.
+        (
+            "role_spoofing",
+            r"""["']?\brole\b["']?\s*[:=]\s*["']?(system|assistant|developer|tool|function)\b"""
+            r"""|["']\s*(system|developer)\s*["']\s*:"""
+            r"""|<\|\s*(im_start|im_end|system|assistant|developer|endoftext)\s*\|>|<<\s*/?\s*sys\s*>>"""
+            r"""|\[\s*/?\s*(system|assistant|developer)(\s+(message|prompt|note))?\s*\]"""
+            r"""|(?:^|[\r\n]|[.!?]\s)\s*[#>*\-]*\s*(system|assistant|developer)\s*(prompt|message|note|override)?\s*:""",
+        ),
         # --- non-English payloads (ES / FR / PT / DE) -------------------------
         (
             "override_instructions_i18n",

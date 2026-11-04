@@ -393,10 +393,12 @@ def plan_resolution(
         reason_code = "GATEWAY_SYNC_ERROR"
         reason = "A payment-processor error caused you to be charged for a payment that was reported as failed."
     if "DUPLICATE_CHARGE" in kinds:
+        # POL-DUP-001: every later charge in a duplicate chain is refunded (A, A+2min, A+4min -> refund
+        # the 2nd and 3rd); only the original charge is retained.
         for f in inv.findings:
             if f.kind == "DUPLICATE_CHARGE":
                 dup = f.transaction_ids[-1]
-                if dup not in refunds and f.transaction_ids[0] not in refunds:
+                if dup not in refunds:
                     refunds[dup] = by_id[dup].refundable_amount
         policies.append("POL-DUP-001")
         reason_code = reason_code or "DUPLICATE_CHARGE"

@@ -146,6 +146,14 @@ class TestEngine:
         txns = [txn("txn_aaaa0001", 149, timedelta(days=3)), txn("txn_aaaa0002", 149, timedelta(days=2))]
         assert detect_duplicates(txns) == []
 
+    def test_triple_charge_refunds_every_later_charge(self) -> None:
+        txns = [txn(f"txn_trip000{i}", 15, timedelta(days=1) - timedelta(minutes=2 * i)) for i in range(3)]
+        inv = investigate(customer=cust(), txns=txns, category="DUPLICATE_CHARGE", referenced_ids=[], dispute_amount=15, now=NOW)
+        plan = plan_resolution(inv=inv, category="DUPLICATE_CHARGE", lookback_days=90, tool_failure=False, injection_detected=False)
+        assert plan.action is not None
+        assert sorted(r.transaction_id for r in plan.action.refunds) == ["txn_trip0001", "txn_trip0002"]
+        assert plan.action.total_amount == 30
+
     def test_gateway_sync_detection(self) -> None:
         f = detect_gateway_sync_errors([txn("txn_gw000001", 59, timedelta(days=1), gateway_status="TIMEOUT")])
         assert f and f[0].kind == "GATEWAY_SYNC_ERROR"

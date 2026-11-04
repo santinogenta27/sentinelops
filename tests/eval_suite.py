@@ -110,10 +110,7 @@ CASES = _load_cases()
 # Known agent defects surfaced by the golden set (baseline: reports/eval_baseline_before_fixes.json).
 # strict=True: a case that starts passing turns into XPASS -> CI fails until it is removed from here.
 # Expected outcomes are never edited to make a case pass.
-_TRIPLE = "duplicate chains: only the first later charge is refunded (POL-DUP-001 says all later charges)"
 KNOWN_FAILURES: dict[str, str] = {
-    "dup_triple_small": _TRIPLE,
-    "dup_triple_large_hitl": _TRIPLE + "; total then stays below the $200 HITL threshold",
     "fraud_abnormal_amount": "fraud: POL-FRD-001 'abnormal amounts' signal is not implemented",
     "already_refunded_large_no_hitl": "mock classifier: 'want our $X back' not a refund keyword -> GENERAL -> escalates instead of deny",
     "inj_spanish_payload": "mock classifier: 'reembolsá' not a refund keyword -> GENERAL -> plans ESCALATE instead of REFUND",
@@ -123,7 +120,6 @@ KNOWN_FAILURES: dict[str, str] = {
 # Aggregate gates currently below threshold because of the cases above (thresholds unchanged).
 KNOWN_GATE_FAILURES: dict[str, str] = {
     "hitl_gate_accuracy": "risky-account, triple-charge and undetected-injection cases",
-    "action_accuracy": "known agent defects listed in KNOWN_FAILURES",
 }
 
 

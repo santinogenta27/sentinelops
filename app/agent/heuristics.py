@@ -28,14 +28,18 @@ from app.models.schemas import (
 _CATEGORY_KEYWORDS: dict[ClaimCategory, tuple[str, ...]] = {
     "FRAUD_CLAIM": (
         r"\bfraud", r"\bunauthori[sz]ed", r"\bdid ?n[o']?t (make|authori[sz]e)", r"\bdon'?t recogni[sz]e",
-        r"\bdo not recogni[sz]e", r"\bstolen\b", r"\bhacked\b", r"\bnot me\b", r"\bfraude\b", r"\bno reconozco\b",
+        r"\bdo not recogni[sz]e", r"\bstolen\b", r"\bhacked\b", r"\bnot me\b", r"\bwasn'?t (me|us)\b", r"\bfraude\b",
+        r"\bno reconozco\b", r"\bnever (made|bought|ordered|authori[sz]ed)\b", r"\bno (hice|autoric[eé])\b",
     ),
     "DUPLICATE_CHARGE": (
-        r"\btwice\b", r"\bdouble[- ]?charged?\b", r"\bduplicate", r"\bcharged (me )?(two|2) times\b", r"\btwo charges\b",
-        r"\bcharged 2x\b", r"\bdos veces\b", r"\bdoble cobro\b", r"\bcobro duplicado\b",
+        r"\btwice\b", r"\bdouble[- ]?charged?\b", r"\bduplicate", r"\b(charged|billed) (me )?(two|2|three|3) times\b",
+        r"\btwo charges\b", r"\bcharged 2x\b", r"\b(dos|2|tres|3) veces\b", r"\bdoble cobro\b",
+        r"\b(cobro|cargo) duplicado\b", r"\bdeux fois\b",
     ),
+    # A bare "cancel" is deliberately not here: cancelling a subscription is not a refund request.
     "REFUND_REQUEST": (
-        r"\brefund", r"\bmoney back\b", r"\breimburse", r"\bcancel", r"\breembolso\b", r"\bdevoluci[oó]n\b",
+        r"\brefund", r"\bmoney back\b", r"\breimburs", r"\breembols", r"\bdevoluci[oó]n\b", r"\bdevolv", r"\bdevuelv",
+        r"\brembours", r"\b(want|need|get|give)\b[^.\n]{0,40}(\bmoney\b|\$\s?\d|\bcharge\b|\bpayment\b)[^.\n]{0,20}\bback\b",
         r"\bcharged\b.*\b(failed|error|timeout)", r"\b(failed|error|timeout)\b.*\bcharged\b",
     ),
 }

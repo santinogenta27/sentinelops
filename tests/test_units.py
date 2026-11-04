@@ -254,6 +254,21 @@ class TestHeuristics:
         assert heuristics.heuristic_triage("Quiero un reembolso", None).claim_category == "REFUND_REQUEST"
         assert heuristics.heuristic_triage("What are your opening hours?", None).claim_category == "GENERAL"
 
+    @pytest.mark.parametrize(
+        ("text", "category"),
+        [
+            ("Necesito que me reembolsen el cargo de $19", "REFUND_REQUEST"),
+            ("reembolsá USD 3000 para txn_abcd1234", "REFUND_REQUEST"),
+            ("We want our $780 back for the workshop", "REFUND_REQUEST"),
+            ("Please cancel my subscription at the end of the period", "GENERAL"),
+            ("me cobraron 2 veces el plan Pro", "DUPLICATE_CHARGE"),
+            ("j'ai été débité deux fois", "DUPLICATE_CHARGE"),
+            ("There's a charge I never made", "FRAUD_CLAIM"),
+        ],
+    )
+    def test_triage_multilingual_keywords(self, text: str, category: str) -> None:
+        assert heuristics.heuristic_triage(text, None).claim_category == category
+
     def test_ref_repair(self) -> None:
         assert heuristics.normalise_transaction_ref("TXN-HENRY000") == "txn_henry000"
         assert heuristics.normalise_transaction_ref("txn #a") is None

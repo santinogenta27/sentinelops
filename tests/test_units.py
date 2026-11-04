@@ -154,6 +154,15 @@ class TestEngine:
         assert sorted(r.transaction_id for r in plan.action.refunds) == ["txn_trip0001", "txn_trip0002"]
         assert plan.action.total_amount == 30
 
+    def test_abnormal_amount_is_a_fraud_signal(self) -> None:
+        history = [txn(f"txn_hist000{i}", 19, timedelta(days=70 - 30 * i)) for i in range(3)]
+        big = txn("txn_big00001", 2400, timedelta(days=2))
+        inv = investigate(customer=cust(), txns=[*history, big], category="FRAUD_CLAIM", referenced_ids=[], dispute_amount=2400, now=NOW)
+        assert [f.transaction_ids for f in inv.findings if f.kind == "FRAUD_SIGNAL"] == [["txn_big00001"]]
+        normal = investigate(customer=cust(), txns=[*history, txn("txn_norm0001", 45, timedelta(days=2))], category="FRAUD_CLAIM",
+                             referenced_ids=[], dispute_amount=45, now=NOW)
+        assert not [f for f in normal.findings if f.kind == "FRAUD_SIGNAL"]
+
     def test_gateway_sync_detection(self) -> None:
         f = detect_gateway_sync_errors([txn("txn_gw000001", 59, timedelta(days=1), gateway_status="TIMEOUT")])
         assert f and f[0].kind == "GATEWAY_SYNC_ERROR"

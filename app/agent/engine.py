@@ -28,6 +28,9 @@ REFUND_WINDOW_DAYS: dict[str, int] = {"FREE": 14, "PRO": 30, "ENTERPRISE": 60}
 GATEWAY_FAILURE_STATES = frozenset({"FAILED", "TIMEOUT", "VOIDED"})
 CAPTURED_LEDGER_STATES = frozenset({"SUCCEEDED", "PARTIALLY_REFUNDED"})
 NOT_CAPTURED_LEDGER_STATES = frozenset({"FAILED", "PENDING"})
+# POL-FRD-001 "abnormal amounts": a charge far above the customer's own history (needs some history).
+ABNORMAL_AMOUNT_MULTIPLIER = 5.0
+ABNORMAL_MIN_HISTORY = 2
 MAX_LOOKBACK_DAYS = 365
 
 
@@ -79,6 +82,9 @@ def detect_fraud_signals(customer: CustomerRecord, txns: list[TransactionRecord]
             signals.append(f"IP country {t.ip_country} differs from account country {customer.country}")
         if i > 0 and t.card_last4 not in seen_cards:
             signals.append(f"card ending {t.card_last4} not previously used on this account")
+        prior = [p.amount for p in ordered[:i]]
+        if len(prior) >= ABNORMAL_MIN_HISTORY and t.amount > ABNORMAL_AMOUNT_MULTIPLIER * max(prior):
+            signals.append(f"amount {t.amount:.2f} is {t.amount / max(prior):.0f}x the largest previous charge ({max(prior):.2f})")
         seen_cards.add(t.card_last4)
         if signals and t.refundable_amount > 0:
             findings.append(Finding(kind="FRAUD_SIGNAL", transaction_ids=[t.id], detail="; ".join(signals)))

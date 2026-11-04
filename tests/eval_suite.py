@@ -111,7 +111,6 @@ CASES = _load_cases()
 # strict=True: a case that starts passing turns into XPASS -> CI fails until it is removed from here.
 # Expected outcomes are never edited to make a case pass.
 KNOWN_FAILURES: dict[str, str] = {
-    "fraud_abnormal_amount": "fraud: POL-FRD-001 'abnormal amounts' signal is not implemented",
     "already_refunded_large_no_hitl": "mock classifier: 'want our $X back' not a refund keyword -> GENERAL -> escalates instead of deny",
     "inj_spanish_payload": "mock classifier: 'reembolsá' not a refund keyword -> GENERAL -> plans ESCALATE instead of REFUND",
     "es_reembolsen_en_ventana": "mock classifier: 'reembolsen' not a refund keyword -> GENERAL -> escalates",
@@ -119,7 +118,6 @@ KNOWN_FAILURES: dict[str, str] = {
 }
 # Aggregate gates currently below threshold because of the cases above (thresholds unchanged).
 KNOWN_GATE_FAILURES: dict[str, str] = {
-    "hitl_gate_accuracy": "risky-account, triple-charge and undetected-injection cases",
 }
 
 

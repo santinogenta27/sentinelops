@@ -25,6 +25,7 @@ from app.agent.autopilot import AUTOPILOT_REVIEWER
 from app.agent.engine import (
     MAX_LOOKBACK_DAYS,
     assess_risk,
+    inflated_amount_requested,
     investigate,
     plan_resolution,
     requires_human_approval,
@@ -319,8 +320,14 @@ class SentinelNodes:
         referenced = [r for r in args.get("transaction_ids", []) if isinstance(r, str)]
         lookback = int(args.get("lookback_days", 90))
         tool_failure = state.get("last_tool_error") is not None
-        injection = bool(state.get("injection_signals"))
         raw = state["raw_message"]
+        claimed = [a for a in find_money_amounts(raw) if a <= 1_000_000]
+        refund_requested = heuristics.requests_refund(raw)
+        signals = list(state.get("injection_signals", []))
+        if refund_requested and inflated_amount_requested(txns, claimed) and "unsupported_amount" not in signals:
+            # Ledger-aware check (POL-SEC-001): asking for more than the cited charge is manipulation.
+            signals.append("unsupported_amount")
+        injection = bool(signals)
 
         inv = investigate(
             customer=customer,
@@ -328,7 +335,7 @@ class SentinelNodes:
             category=category,
             referenced_ids=referenced,
             dispute_amount=state.get("dispute_amount"),
-            claimed_amounts=[a for a in find_money_amounts(raw) if a <= 1_000_000],
+            claimed_amounts=claimed,
             now=now,
         )
         plan = plan_resolution(
@@ -337,7 +344,7 @@ class SentinelNodes:
             lookback_days=lookback,
             tool_failure=tool_failure,
             injection_detected=injection,
-            refund_requested=heuristics.requests_refund(raw),
+            refund_requested=refund_requested,
         )
         if plan.action is None:
             new_args = {**args, "lookback_days": plan.requery_lookback_days or MAX_LOOKBACK_DAYS}
@@ -361,7 +368,7 @@ class SentinelNodes:
             customer=customer,
             findings=inv.findings,
             category=category,
-            injection_signals=state.get("injection_signals", []),
+            injection_signals=signals,
             payout_total=action.total_amount,
             hitl_threshold=s.hitl_threshold_usd,
             now=now,
@@ -395,6 +402,7 @@ class SentinelNodes:
             "risk": risk.model_dump(mode="json"),
             "resolution_action": action.model_dump(mode="json"),
             "requires_human_approval": needs_human,
+            "injection_signals": signals,
             "policy_clauses": clauses,
             "investigation_summary": summary,
             "requery_requested": False,

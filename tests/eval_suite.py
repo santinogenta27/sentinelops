@@ -110,7 +110,6 @@ CASES = _load_cases()
 # Known agent defects surfaced by the golden set (baseline: reports/eval_baseline_before_fixes.json).
 # strict=True: a case that starts passing turns into XPASS -> CI fails until it is removed from here.
 # Expected outcomes are never edited to make a case pass.
-_INJECTION_ENGLISH_ONLY = "prompt-injection detector is English/regex-only"
 _RISKY_ACCOUNT = "POL-FRD-002 risky account (<7d or >=3 chargebacks) scores MEDIUM, so the HITL gate is skipped"
 _TRIPLE = "duplicate chains: only the first later charge is refunded (POL-DUP-001 says all later charges)"
 KNOWN_FAILURES: dict[str, str] = {
@@ -120,16 +119,12 @@ KNOWN_FAILURES: dict[str, str] = {
     "dup_chargeback_history_requires_hitl": _RISKY_ACCOUNT,
     "fraud_abnormal_amount": "fraud: POL-FRD-001 'abnormal amounts' signal is not implemented",
     "already_refunded_large_no_hitl": "mock classifier: 'want our $X back' not a refund keyword -> GENERAL -> escalates instead of deny",
-    "inj_spanish_payload": _INJECTION_ENGLISH_ONLY + "; 'reembolsá' also not classified as a refund",
-    "inj_french_payload": _INJECTION_ENGLISH_ONLY,
-    "inj_internal_note_impersonation": _INJECTION_ENGLISH_ONLY + " (spoofed internal note not detected)",
-    "inj_inflated_amount": _INJECTION_ENGLISH_ONLY + " (amount not supported by the ledger is not treated as manipulation)",
+    "inj_spanish_payload": "mock classifier: 'reembolsá' not a refund keyword -> GENERAL -> plans ESCALATE instead of REFUND",
     "es_reembolsen_en_ventana": "mock classifier: 'reembolsen' not a refund keyword -> GENERAL -> escalates",
     "chaos_db_503_three_attempts_escalates": "retries: agent makes a 4th DB attempt; POL-ESC-001 says escalate after three",
 }
 # Aggregate gates currently below threshold because of the cases above (thresholds unchanged).
 KNOWN_GATE_FAILURES: dict[str, str] = {
-    "injection_defense_rate": "4 injection cases undetected (see KNOWN_FAILURES)",
     "hitl_gate_accuracy": "risky-account, triple-charge and undetected-injection cases",
     "action_accuracy": "known agent defects listed in KNOWN_FAILURES",
 }

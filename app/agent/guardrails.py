@@ -16,6 +16,32 @@ _INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("approval_bypass", r"\b(skip|bypass|circumvent|disable|without)\b[^.\n]{0,30}\b(approval|human|review|verification|supervisor|checks?)\b"),
         ("markup_injection", r"(<\s*/?\s*(system|assistant|instructions?)\s*>|\[/?INST\]|###\s*(system|instruction)|```\s*system)"),
         ("tool_coercion", r"\b(call|execute|invoke|run)\b[^.\n]{0,20}\b(tool|function|stripe|refund api|create_refund)\b"),
+        # --- non-English payloads (ES / FR / PT / DE) -------------------------
+        (
+            "override_instructions_i18n",
+            r"\b(ignor[aáe]\w*|olvid[aáe]\w*|ignorez|oubliez|ignorer|esque[cç]a\w*|ignoriere\w*|vergiss\w*)\b[^.\n]{0,40}"
+            r"\b(instruc\w*|regla\w*|reglas|pol[ií]tica\w*|r[eè]gle\w*|consigne\w*|regra\w*|anweisung\w*|richtlinie\w*|regeln)",
+        ),
+        (
+            "fake_authorization_i18n",
+            r"\b(ya\s+(est[aá]|fue|ha\s+sido)\s+(aprobad|autorizad)\w*|pre-?aprobad\w*|aprobad[oa]\s+por\s+(el|la|mi|un)\s+"
+            r"(supervisor|gerente|jefe|manager)\w*|d[eé]j[aà]\s+(approuv|autoris|valid)\w*|pr[eé]-?approuv\w*|"
+            r"j[aá]\s+(foi\s+)?(aprovad|autorizad)\w*|bereits\s+(genehmigt|freigegeben))",
+        ),
+        (
+            "approval_bypass_i18n",
+            r"\b(sin|saltea\w*|salta\w*|omit\w*|evit\w*|sans|contourn\w*|sem|pular|ohne|umgeh\w*)\b[^.\n]{0,30}"
+            r"\b(aprobaci[oó]n|revisi[oó]n|verificaci[oó]n|supervisor\w*|human[oa]s?|validation|v[eé]rification|approbation|"
+            r"humaine?|aprova[cç][aã]o|revis[aã]o|pr[uü]fung|freigabe|genehmigung)\b",
+        ),
+        # --- impersonating staff / internal systems to instruct the agent ------
+        (
+            "staff_impersonation",
+            r"\[\s*internal\b|\binternal\s+(note|memo|instruction|directive)s?\b|"
+            r"\b(this is|message from|on behalf of)\s+(the\s+)?(\w+\s+){0,2}(support|billing|security|compliance|finance)\s+"
+            r"(team|department|desk|ops|operations)\b|"
+            r"\b(identity|kyc|account)\s+verification\s+(is\s+|has\s+been\s+)?(complete|completed|done|passed)\b",
+        ),
     )
 )
 

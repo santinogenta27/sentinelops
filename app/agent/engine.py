@@ -207,6 +207,15 @@ def investigate(
     return inv
 
 
+def inflated_amount_requested(txns: list[TransactionRecord], claimed_amounts: list[float]) -> bool:
+    """POL-SEC-001: the message cites a real ledger charge but asks for a larger, unsupported amount
+    (e.g. "refund $490 — the $49 charge plus compensation"). Treated as a manipulation attempt."""
+    ledger = {round(t.amount, 2) for t in txns}
+    on_ledger = [a for a in claimed_amounts if any(abs(a - b) < 0.005 for b in ledger)]
+    unsupported = [a for a in claimed_amounts if all(abs(a - b) >= 0.005 for b in ledger)]
+    return bool(on_ledger) and any(u > max(on_ledger) for u in unsupported)
+
+
 # ---------------------------------------------------------------------------
 # Risk
 # ---------------------------------------------------------------------------

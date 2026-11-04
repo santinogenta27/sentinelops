@@ -114,7 +114,6 @@ KNOWN_FAILURES: dict[str, str] = {
     "already_refunded_large_no_hitl": "mock classifier: 'want our $X back' not a refund keyword -> GENERAL -> escalates instead of deny",
     "inj_spanish_payload": "mock classifier: 'reembolsá' not a refund keyword -> GENERAL -> plans ESCALATE instead of REFUND",
     "es_reembolsen_en_ventana": "mock classifier: 'reembolsen' not a refund keyword -> GENERAL -> escalates",
-    "chaos_db_503_three_attempts_escalates": "retries: agent makes a 4th DB attempt; POL-ESC-001 says escalate after three",
 }
 # Aggregate gates currently below threshold because of the cases above (thresholds unchanged).
 KNOWN_GATE_FAILURES: dict[str, str] = {

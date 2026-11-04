@@ -133,7 +133,7 @@ async def test_persistent_db_failure_escalates_without_payout(runtime: SentinelR
     faults.fail_next("db.query_transactions", times=10, kind="error")
     tid, v = await runtime.run_ticket("I was charged twice, $149. alice@acme-corp.com")
     db_calls = [c for c in v["tool_calls"] if c["tool"] == "db.query_transactions"]
-    assert len(db_calls) == runtime.settings.max_tool_retries + 1  # initial attempt + 3 retries
+    assert len(db_calls) == 3  # POL-ESC-001: escalate after three attempts
     assert v["resolution_action"]["action_type"] == "ESCALATE"
     assert v["execution_status"] == "ESCALATED"
     assert await refunds_for(runtime, tid) == []

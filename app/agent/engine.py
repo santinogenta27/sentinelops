@@ -32,6 +32,13 @@ NOT_CAPTURED_LEDGER_STATES = frozenset({"FAILED", "PENDING"})
 ABNORMAL_AMOUNT_MULTIPLIER = 5.0
 ABNORMAL_MIN_HISTORY = 2
 MAX_LOOKBACK_DAYS = 365
+# POL-ESC-001: "If internal systems cannot be queried after three attempts, the case must be escalated".
+# Hard ceiling on ledger query attempts, whatever MAX_TOOL_RETRIES is configured to.
+POLICY_MAX_QUERY_ATTEMPTS = 3
+
+
+def max_query_attempts(configured_retries: int) -> int:
+    return min(configured_retries + 1, POLICY_MAX_QUERY_ATTEMPTS)
 
 
 # ---------------------------------------------------------------------------

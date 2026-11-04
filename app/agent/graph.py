@@ -1,6 +1,6 @@
 """SentinelOps LangGraph state machine.
 
-    triage ─► db_inspector ◄─┐ (self-correction: invalid args / tool failure, ≤ MAX_TOOL_RETRIES)
+    triage ─► db_inspector ◄─┐ (self-correction: invalid args / tool failure, ≤ 3 attempts, POL-ESC-001)
                   │ ▲        │
                   ▼ └────────┘
           policy_retriever
@@ -30,6 +30,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.agent.engine import max_query_attempts
 from app.agent.nodes import AgentDeps, SentinelNodes
 from app.models.state import AgentState
 
@@ -69,7 +70,8 @@ def build_graph(deps: AgentDeps, checkpointer: BaseCheckpointSaver[str] | None =
     s = deps.settings
 
     def route_after_db(state: AgentState) -> Literal["db_inspector", "policy_retriever"]:
-        if state.get("last_tool_error") and state["tool_error_count"] <= s.max_tool_retries:
+        # tool_error_count == failed attempts so far; stop at the POL-ESC-001 ceiling and escalate.
+        if state.get("last_tool_error") and state["tool_error_count"] < max_query_attempts(s.max_tool_retries):
             return "db_inspector"
         return "policy_retriever"
 

@@ -43,7 +43,7 @@ In bash: `export GEMINI_API_KEY=...`; in PowerShell: `$env:GEMINI_API_KEY="..."`
 | `EMBEDDING_PROVIDER` | `local` | `local` (deterministic hashing) · `gemini` (`gemini-embedding-001`) |
 | `HITL_THRESHOLD_USD` | `200` | Human approval threshold |
 | `JUDGE_PASS_THRESHOLD` | `0.85` | Minimum faithfulness score |
-| `MAX_TOOL_RETRIES` / `MAX_REDRAFTS` | `3` / `2` | Self-correction budgets |
+| `MAX_TOOL_RETRIES` / `MAX_REDRAFTS` | `3` / `2` | Self-correction budgets (ledger queries are additionally capped at 3 attempts by POL-ESC-001) |
 | `AUTOPILOT_DEFAULT` / `AUTOPILOT_MAX_USD` | `true` / `1000` | Initial Auto-Pilot state and automatic-approval ceiling |
 | `STRIPE_API_KEY` / `STRIPE_MIRROR_REFUNDS` | — / `true` | `sk_test_…` key for the Stripe dashboard and the refund mirror |
 | `EMAIL_LOOKBACK_MINUTES` / `EMAIL_SUBJECT_KEYWORDS` | `120` / empty | How far back the mailbox is read · optional subject filter |

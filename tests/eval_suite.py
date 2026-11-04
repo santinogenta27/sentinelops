@@ -42,7 +42,15 @@ import pytest
 
 from app.agent.guardrails import find_money_amounts, grounding_check
 from app.config import PROJECT_ROOT, Settings
-from app.db.seed import CUSTOMERS, EVAL_CUSTOMERS, EVAL_TRANSACTIONS, TRANSACTIONS, seed_database
+from app.db.seed import (
+    CUSTOMERS,
+    EVAL_CUSTOMERS,
+    EVAL_TRANSACTIONS,
+    HELDOUT_CUSTOMERS,
+    HELDOUT_TRANSACTIONS,
+    TRANSACTIONS,
+    seed_database,
+)
 from app.integrations.faults import FaultInjector
 from app.models.schemas import HumanDecision
 from app.services.runtime import SentinelRuntime
@@ -133,9 +141,9 @@ def _accepts(expected: Any, actual: Any) -> bool:
     return actual in expected if isinstance(expected, list) else actual == expected
 
 
-async def _run_case(rt: SentinelRuntime, faults: FaultInjector, case: dict[str, Any]) -> CaseResult:
+async def _run_case(rt: SentinelRuntime, faults: FaultInjector, case: dict[str, Any], *, heldout: bool = False) -> CaseResult:
     exp = case["expected"]
-    await seed_database(rt.db, force=True, include_eval_fixtures=True)
+    await seed_database(rt.db, force=True, include_eval_fixtures=not heldout, include_heldout_fixtures=heldout)
     faults.clear()
     for f in case.get("faults", []):
         faults.fail_next(f["tool"], f["times"], f["kind"])
@@ -233,7 +241,7 @@ async def _run_case(rt: SentinelRuntime, faults: FaultInjector, case: dict[str, 
     )
 
 
-async def _run_all() -> tuple[list[CaseResult], str]:
+async def _run_all(cases: list[dict[str, Any]] | None = None, *, heldout: bool = False) -> tuple[list[CaseResult], str]:
     with tempfile.TemporaryDirectory(prefix="sentinel-eval-") as tmp:
         if LIVE:
             settings = Settings(data_dir=Path(tmp))
@@ -242,7 +250,7 @@ async def _run_all() -> tuple[list[CaseResult], str]:
         faults = FaultInjector()
         rt = await SentinelRuntime.create(settings, llm="auto" if LIVE else None, faults=faults, persist_vectors=False)
         try:
-            results = [await _run_case(rt, faults, c) for c in CASES]
+            results = [await _run_case(rt, faults, c, heldout=heldout) for c in (CASES if cases is None else cases)]
             provider = json.dumps(rt.llm_status(), default=str)
         finally:
             await rt.close()
@@ -315,16 +323,16 @@ def eval_run() -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ dataset integrity (no agent run)
-_SEED_TXNS = {t.id: t for t in (*TRANSACTIONS, *EVAL_TRANSACTIONS)}
-_SEED_EMAILS = {c.email for c in (*CUSTOMERS, *EVAL_CUSTOMERS)}
+_SEED_TXNS = {t.id: t for t in (*TRANSACTIONS, *EVAL_TRANSACTIONS, *HELDOUT_TRANSACTIONS)}
+_SEED_EMAILS = {c.email for c in (*CUSTOMERS, *EVAL_CUSTOMERS, *HELDOUT_CUSTOMERS)}
 _EXPECTED_KEYS = {"category", "action_type", "payout", "refund_txns", "requires_approval", "final_status", "tools"}
 
 
-def test_dataset_integrity() -> None:
-    """Golden set is well-formed and every expected payout is backed by the seeded ledger."""
-    ids = [c["id"] for c in CASES]
+def check_dataset(cases: list[dict[str, Any]]) -> None:
+    """A dataset is well-formed and every expected payout is backed by the seeded ledger."""
+    ids = [c["id"] for c in cases]
     assert len(ids) == len(set(ids)), "duplicate case ids"
-    for c in CASES:
+    for c in cases:
         cid, exp = c["id"], c["expected"]
         assert c.get("category_group") in CATEGORY_GROUPS, f"{cid}: bad category_group {c.get('category_group')!r}"
         assert not (_EXPECTED_KEYS - exp.keys()), f"{cid}: expected is missing {_EXPECTED_KEYS - exp.keys()}"
@@ -340,6 +348,10 @@ def test_dataset_integrity() -> None:
             assert "stripe.create_refund" in exp["tools"], f"{cid}: a payout needs stripe.create_refund"
         if exp["payout"] > 200:
             assert exp["requires_approval"], f"{cid}: payout above $200 must expect HITL"
+
+
+def test_dataset_integrity() -> None:
+    check_dataset(CASES)
 
 
 # ------------------------------------------------------------------ per-case

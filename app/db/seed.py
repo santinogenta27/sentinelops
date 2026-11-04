@@ -379,16 +379,119 @@ EVAL_TRANSACTIONS: tuple[SeedTxn, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Held-out fixtures (tests/datasets/heldout_tickets.json). Never used to tune the agent and not part
+# of the CI gate; only inserted with ``include_heldout_fixtures=True`` (tests/heldout_eval.py).
+# ---------------------------------------------------------------------------
+HELDOUT_CUSTOMERS: tuple[SeedCustomer, ...] = (
+    _c("cus_ho01", "priya.raman@tealbird.example", "Priya Raman", "PRO", "IN", 500),
+    _c("cus_ho02", "marcus.oyelaran@deltaforge.example", "Marcus Oyelaran", "ENTERPRISE", "NG", 1300),
+    _c("cus_ho03", "elif.demir@bosphorus.example", "Elif Demir", "FREE", "TR", 250),
+    _c("cus_ho04", "johan.lindqvist@nordkap.example", "Johan Lindqvist", "ENTERPRISE", "SE", 900),
+    _c("cus_ho05", "carmen.vidal@olivar.example", "Carmen Vidal", "PRO", "ES"),
+    _c("cus_ho06", "tariq.aziz@sandcastle.example", "Tariq Aziz", "PRO", "AE"),
+    _c("cus_ho07", "lea.fontaine@belleville.example", "Lea Fontaine", "PRO", "FR", 5),
+    _c("cus_ho08", "kenji.watanabe@sakuralane.example", "Kenji Watanabe", "PRO", "JP", 600),
+    _c("cus_ho09", "amara.okafor@greenhill.example", "Amara Okafor", "PRO", age_days=800),
+    _c("cus_ho10", "dmitri.volkov@taiga.example", "Dmitri Volkov", "ENTERPRISE", "CA", 700),
+    _c("cus_ho11", "nadia.haddad@cedarcrest.example", "Nadia Haddad", "PRO", age_days=900),
+    _c("cus_ho12", "giulia.ferri@trastevere.example", "Giulia Ferri", "PRO", "IT"),
+    _c("cus_ho13", "ollie.grant@puddleby.example", "Ollie Grant", "FREE", "GB"),
+    _c("cus_ho14", "beatriz.lima@ipanema.example", "Beatriz Lima", "ENTERPRISE", "BR", 900),
+    _c("cus_ho15", "henry.walsh@moorgate.example", "Henry Walsh", "ENTERPRISE", "GB", 900),
+    _c("cus_ho16", "sana.malik@karakoram.example", "Sana Malik", "PRO", "PK"),
+    _c("cus_ho17", "oscar.berg@fjell.example", "Oscar Berg", "ENTERPRISE", "NO", 900),
+    _c("cus_ho18", "yuki.tanaka@hanami.example", "Yuki Tanaka", "PRO", "JP"),
+    _c("cus_ho20", "ravi.menon@backwater.example", "Ravi Menon", "PRO", "IN"),
+    _c("cus_ho21", "rafael.souza@copacabana.example", "Rafael Souza", "PRO", "BR"),
+    _c("cus_ho22", "nora.lindgren@aurora.example", "Nora Lindgren", "PRO"),
+    _c("cus_ho23", "felix.braun@schwarzwald.example", "Felix Braun", "ENTERPRISE", "DE", 900),
+    _c("cus_ho24", "lucy.chen@harbourlights.example", "Lucy Chen", "FREE"),
+    _c("cus_ho25", "ximena.reyes@jacaranda.example", "Ximena Reyes", "PRO", "MX"),
+    _c("cus_ho26", "matteo.greco@navigli.example", "Matteo Greco", "PRO", "IT"),
+    _c("cus_ho27", "tomas.acosta@pampas.example", "Tomas Acosta", "FREE", "AR"),
+    _c("cus_ho28", "ines.duarte@alfama.example", "Ines Duarte", "PRO", "PT"),
+    _c("cus_ho29", "sam.okoro@riverside.example", "Sam Okoro", "PRO"),
+    _c("cus_ho30", "irene.papadopoulos@aegean.example", "Irene Papadopoulos", "ENTERPRISE", "GR", 900),
+)
+
+HELDOUT_TRANSACTIONS: tuple[SeedTxn, ...] = (
+    _T("txn_ho01a", "cus_ho01", 137.50, 5 * _D, "SENTINEL*PRO QUARTERLY", ip_country="IN"),
+    _T("txn_ho01b", "cus_ho01", 137.50, 5 * _D - 4 * _M, "SENTINEL*PRO QUARTERLY", ip_country="IN"),
+    _T("txn_ho02a", "cus_ho02", 1120.00, 9 * _D, "SENTINEL*ENTERPRISE RENEWAL", ip_country="NG"),
+    _T("txn_ho02b", "cus_ho02", 1120.00, 9 * _D - 7 * _M, "SENTINEL*ENTERPRISE RENEWAL", ip_country="NG"),
+    _T("txn_ho03a", "cus_ho03", 8.00, 2 * _D, "SENTINEL*STARTER MINI", ip_country="TR"),
+    _T("txn_ho03b", "cus_ho03", 8.00, 2 * _D - 1 * _M, "SENTINEL*STARTER MINI", ip_country="TR"),
+    _T("txn_ho03c", "cus_ho03", 8.00, 2 * _D - 2 * _M, "SENTINEL*STARTER MINI", ip_country="TR"),
+    _T("txn_ho03d", "cus_ho03", 8.00, 2 * _D - 3 * _M, "SENTINEL*STARTER MINI", ip_country="TR"),
+    _T("txn_ho04a", "cus_ho04", 275.00, 6 * _D, "SENTINEL*ENTERPRISE SUPPORT", gateway_status="FAILED", ip_country="SE"),
+    _T("txn_ho04b", "cus_ho04", 275.00, 6 * _D - 12 * _M, "SENTINEL*ENTERPRISE SUPPORT", ip_country="SE"),
+    _T("txn_ho05a", "cus_ho05", 64.00, 38 * _D, "SENTINEL*PRO MONTHLY", ip_country="ES"),
+    _T("txn_ho05b", "cus_ho05", 64.00, 38 * _D - 12 * _M, "SENTINEL*PRO MONTHLY", ip_country="ES"),
+    _T("txn_ho06a", "cus_ho06", 240.00, 1 * _D, "SENTINEL*PRO ANNUAL", ip_country="AE"),
+    _T("txn_ho06b", "cus_ho06", 240.00, 1 * _D - 3 * _M, "SENTINEL*PRO ANNUAL", ip_country="AE"),
+    _T("txn_ho07a", "cus_ho07", 18.00, 1 * _D, "SENTINEL*PRO LITE", ip_country="FR"),
+    _T("txn_ho07b", "cus_ho07", 18.00, 1 * _D - 30 * _S, "SENTINEL*PRO LITE", ip_country="FR"),
+    _T("txn_ho08a", "cus_ho08", 32.00, 25 * _D, "SENTINEL*PRO LITE", ip_country="JP"),
+    _T("txn_ho08b", "cus_ho08", 415.00, 1 * _D, "SENTINEL*HARDWARE BUNDLE", card_last4="6214", ip_country="MX"),
+    _T("txn_ho09a", "cus_ho09", 72.00, 35 * _D, "SENTINEL*PRO TEAM"),
+    _T("txn_ho09b", "cus_ho09", 72.00, 5 * _D, "SENTINEL*PRO TEAM"),
+    _T("txn_ho10a", "cus_ho10", 400.00, 20 * _D, "SENTINEL*ENTERPRISE MONTHLY", ip_country="CA"),
+    _T("txn_ho10b", "cus_ho10", 95.00, 2 * _D, "SENTINEL*API CREDITS", card_last4="5100", ip_country="PH"),
+    _T("txn_ho11a", "cus_ho11", 24.00, 80 * _D, "SENTINEL*PRO LITE"),
+    _T("txn_ho11b", "cus_ho11", 24.00, 50 * _D, "SENTINEL*PRO LITE"),
+    _T("txn_ho11c", "cus_ho11", 24.00, 20 * _D, "SENTINEL*PRO LITE"),
+    _T("txn_ho11d", "cus_ho11", 980.00, 1 * _D, "SENTINEL*HARDWARE KIT"),
+    _T("txn_ho12a", "cus_ho12", 44.00, 18 * _D, "SENTINEL*PRO SEATS", ip_country="IT"),
+    _T("txn_ho13a", "cus_ho13", 12.00, 22 * _D, "SENTINEL*STARTER", ip_country="GB"),
+    _T("txn_ho14a", "cus_ho14", 3200.00, 45 * _D, "SENTINEL*ENTERPRISE ONBOARDING PLUS", ip_country="BR"),
+    _T("txn_ho15a", "cus_ho15", 150.00, 75 * _D, "SENTINEL*ENTERPRISE TRAINING", ip_country="GB"),
+    _T("txn_ho16a", "cus_ho16", 88.00, 9 * _D, "SENTINEL*PRO PLUS", status="REFUNDED", ip_country="PK", refunded_amount=88.00),
+    _T("txn_ho17a", "cus_ho17", 900.00, 20 * _D, "SENTINEL*ENTERPRISE WORKSHOP", status="PARTIALLY_REFUNDED", ip_country="NO",
+       refunded_amount=300.00),
+    _T("txn_ho18a", "cus_ho18", 55.00, 4 * _D, "SENTINEL*PRO MONTHLY", ip_country="JP"),
+    _T("txn_ho18b", "cus_ho18", 55.00, 4 * _D - 1 * _M, "SENTINEL*PRO MONTHLY", status="REFUNDED", ip_country="JP",
+       refunded_amount=55.00),
+    _T("txn_ho20a", "cus_ho20", 27.00, 6 * _D, "SENTINEL*PRO LITE", ip_country="IN"),
+    _T("txn_ho21a", "cus_ho21", 47.00, 3 * _D, "SENTINEL*PRO PLUS", ip_country="BR"),
+    _T("txn_ho21b", "cus_ho21", 47.00, 3 * _D - 2 * _M, "SENTINEL*PRO PLUS", ip_country="BR"),
+    _T("txn_ho22a", "cus_ho22", 66.00, 8 * _D, "SENTINEL*PRO MONTHLY"),
+    _T("txn_ho23a", "cus_ho23", 520.00, 12 * _D, "SENTINEL*ENTERPRISE SEATS", ip_country="DE"),
+    _T("txn_ho24a", "cus_ho24", 29.00, 40 * _D, "SENTINEL*STARTER PLUS"),
+    _T("txn_ho25a", "cus_ho25", 33.00, 2 * _D, "SENTINEL*PRO LITE", ip_country="MX"),
+    _T("txn_ho25b", "cus_ho25", 33.00, 2 * _D - 50 * _S, "SENTINEL*PRO LITE", ip_country="MX"),
+    _T("txn_ho26a", "cus_ho26", 58.00, 7 * _D, "SENTINEL*PRO MONTHLY", ip_country="IT"),
+    _T("txn_ho27a", "cus_ho27", 10.00, 40 * _D, "SENTINEL*STARTER", ip_country="AR"),
+    _T("txn_ho27b", "cus_ho27", 260.00, 1 * _D, "SENTINEL*HARDWARE KIT", card_last4="3355", ip_country="ES"),
+    _T("txn_ho28a", "cus_ho28", 22.00, 3 * _D, "SENTINEL*ADDON SEATS", ip_country="PT"),
+    _T("txn_ho28b", "cus_ho28", 22.00, 5 * _D, "SENTINEL*ADDON STORAGE", ip_country="PT"),
+    _T("txn_ho28c", "cus_ho28", 70.00, 9 * _D, "SENTINEL*PRO PLUS", ip_country="PT"),
+    _T("txn_ho29a", "cus_ho29", 49.00, 6 * _D, "SENTINEL*PRO MONTHLY"),
+    _T("txn_ho30a", "cus_ho30", 310.00, 4 * _D, "SENTINEL*ENTERPRISE ADDON", ip_country="GR"),
+    _T("txn_ho30b", "cus_ho30", 310.00, 4 * _D - 2 * _M, "SENTINEL*ENTERPRISE ADDON", ip_country="GR"),
+)
+
+
 async def seed_database(
-    db: Database, *, force: bool = False, now: datetime | None = None, include_eval_fixtures: bool = False
+    db: Database,
+    *,
+    force: bool = False,
+    now: datetime | None = None,
+    include_eval_fixtures: bool = False,
+    include_heldout_fixtures: bool = False,
 ) -> bool:
     """Insert seed rows. Returns True if seeding happened.
 
-    ``include_eval_fixtures`` adds the per-scenario ledgers used by the golden eval set on top of
-    the demo customers (which are always seeded unchanged).
+    ``include_eval_fixtures`` adds the per-scenario ledgers used by the golden eval set and
+    ``include_heldout_fixtures`` the ones used by the held-out set, on top of the demo customers
+    (which are always seeded unchanged).
     """
-    customers = CUSTOMERS + EVAL_CUSTOMERS if include_eval_fixtures else CUSTOMERS
-    transactions = TRANSACTIONS + EVAL_TRANSACTIONS if include_eval_fixtures else TRANSACTIONS
+    customers = CUSTOMERS
+    transactions = TRANSACTIONS
+    if include_eval_fixtures:
+        customers, transactions = customers + EVAL_CUSTOMERS, transactions + EVAL_TRANSACTIONS
+    if include_heldout_fixtures:
+        customers, transactions = customers + HELDOUT_CUSTOMERS, transactions + HELDOUT_TRANSACTIONS
     now = now or utcnow()
     async with db.connect() as conn:
         cur = await conn.execute("SELECT COUNT(*) FROM customers")

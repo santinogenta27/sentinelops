@@ -1,0 +1,93 @@
+# SentinelOps benchmark: models, prices and free-tier quotas.
+#
+# Read by evals/run_benchmark.py. Prices are USD per 1M tokens; output prices include thinking /
+# reasoning tokens (that is how both providers bill them). Free-tier quotas are EDITABLE: providers
+# change them often and Google no longer publishes a per-model table, so copy the values your own
+# console shows (Google AI Studio -> Rate limits, Groq console -> Settings -> Limits).
+#
+# Availability, prices and quotas below were checked on 2026-11-04. Re-check before quoting numbers.
+
+[benchmark]
+default_models = ["deterministic", "gemini-3.8-flash", "gpt-oss-120b"]
+# A run is marked invalid (and excluded from SUMMARY averages) when more than this share of its cases
+# had a node fall back to the deterministic engine because the model's answer was unusable.
+max_fallback_rate = 0.02
+
+[heldout]
+# Held-out cases whose result is no longer evidence of generalisation. They are still run and kept in
+# the raw JSON, but the headline held-out metrics are computed without them.
+contaminated = { ho_inj_fake_system_json = "the role-spoofing detector (commit 19323eb) was motivated by this held-out failure" }
+
+# Used by --estimate until a real run has measured calls/tokens per case for the model.
+[estimate_defaults]
+calls_per_case = 4.5
+input_tokens_per_call = 2000
+
+# ------------------------------------------------------------------------------------------------
+[[model]]
+id = "deterministic"
+provider = "mock"
+model = "deterministic-engine"
+input_usd_per_mtok = 0.0
+output_usd_per_mtok = 0.0
+prices_as_of = "2026-11-04"
+price_source = "no LLM: rule-based engine (app/agent/heuristics.py)"
+notes = "Baseline. Runs offline; 3 identical runs are expected (stdev 0)."
+
+# ------------------------------------------------------------------------------------------------
+[[model]]
+id = "gemini-3.8-flash"
+provider = "gemini"
+model = "gemini-3.8-flash"
+api_key_env = "GEMINI_API_KEY"
+input_usd_per_mtok = 0.75
+output_usd_per_mtok = 3.75
+prices_as_of = "2026-11-04"
+price_valid_until = "2026-12-31"
+price_after = "from 2027-01-01: $1.50 input / $7.50 output per 1M tokens"
+price_source = "https://aistudio.google.com/docs/pricing"
+est_output_tokens_per_call = 600
+est_seconds_per_call = 3.0
+replaces = "gemini-2.5-flash"
+notes = """\
+gemini-2.5-flash is deprecated and no longer offered to new API users (existing users only; from \
+2026-12-01 its requests are routed to gemini-3.5-flash-lite). gemini-3.8-flash is the current Flash \
+model. GeminiClient only disables thinking for 2.5 Flash, so 3.8 Flash runs with the provider's \
+default thinking: those tokens are measured and billed as output. Google recommends temperature 1.0 \
+for Gemini 3 models; the client keeps temperature 0.0 (unchanged agent configuration).\
+"""
+
+[model.free_tier]
+rpm = 5
+rpd = 20
+tpm = 250000
+tpd = 0                     # 0 = no daily token cap known
+daily_reset_utc_hour = 8    # midnight US Pacific (PST); during PDT the real reset is 1 h earlier
+quota_source = "third-party reports (ScriptByAI, Google AI forum), Nov 2026; Google does not publish the table: check AI Studio"
+
+# ------------------------------------------------------------------------------------------------
+[[model]]
+id = "gpt-oss-120b"
+provider = "groq"
+model = "openai/gpt-oss-120b"
+api_key_env = "GROQ_API_KEY"
+input_usd_per_mtok = 0.15
+output_usd_per_mtok = 0.60
+prices_as_of = "2026-11-04"
+price_source = "Groq list price as reported by pricing trackers (Oct 2026); groq.com/pricing did not render it"
+est_output_tokens_per_call = 800
+est_seconds_per_call = 2.0
+replaces = "llama-3.3-70b-versatile"
+notes = """\
+llama-3.3-70b-versatile was shut down for free/developer tiers on 2026-08-16 \
+(console.groq.com/docs/deprecations); Groq's recommended replacement is openai/gpt-oss-120b. \
+It is a reasoning model: reasoning tokens are part of completion_tokens and billed as output.\
+"""
+
+[model.free_tier]
+rpm = 30
+rpd = 1000
+tpm = 8000
+tpd = 200000
+daily_reset_utc_hour = 0
+quota_source = "console.groq.com/docs/rate-limits (Free plan), Nov 2026"

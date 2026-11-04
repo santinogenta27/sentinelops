@@ -34,6 +34,7 @@ from app.llm.base import LLMClient
 from app.llm.factory import build_llm
 from app.models.schemas import TERMINAL_STATUSES, ChannelMeta, HumanDecision, TicketView
 from app.models.state import AgentState, initial_state
+from app.observability import configure_tracing
 from app.rag.embeddings import Embedder, GeminiEmbedder, HashingEmbedder
 from app.rag.retriever import PolicyRetriever, load_policies
 from app.services.controls import RuntimeControls
@@ -133,6 +134,7 @@ class SentinelRuntime:
         mail_transport: Transport | None = None,
         stripe_backend: Callable[[str], StripeBackend] | None = None,
     ) -> SentinelRuntime:
+        configure_tracing(settings)
         db = Database(settings.business_db_path)
         await db.init_schema()
         await seed_database(db)
@@ -189,9 +191,20 @@ class SentinelRuntime:
         return self.deps.llm.status()
 
     # ----------------------------------------------------------------- running
-    @staticmethod
-    def _config(ticket_id: str) -> RunnableConfig:
-        return {"configurable": {"thread_id": ticket_id}, "recursion_limit": 60}
+    def _config(self, ticket_id: str) -> RunnableConfig:
+        # run_name/tags/metadata only label LangSmith traces (inert when tracing is off).
+        llm = self.deps.llm
+        return {
+            "configurable": {"thread_id": ticket_id},
+            "recursion_limit": 60,
+            "run_name": "sentinelops.ticket",
+            "tags": ["sentinelops", llm.provider if llm else "deterministic"],
+            "metadata": {
+                "ticket_id": ticket_id,
+                "llm_provider": llm.provider if llm else "deterministic",
+                "llm_model": llm.model if llm else None,
+            },
+        }
 
     def _lock(self, ticket_id: str) -> asyncio.Lock:
         return self._locks.setdefault(ticket_id, asyncio.Lock())

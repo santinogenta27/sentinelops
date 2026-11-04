@@ -7,7 +7,7 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 
-from app.llm.base import LLMClient, LLMError, LLMUnavailableError
+from app.llm.base import LLMClient, LLMError, LLMUnavailableError, usage_from_mapping
 
 _RETRYABLE_HTTP = {408, 429, 500, 502, 503, 504}
 _AUTH_HTTP = {401, 403}
@@ -34,10 +34,18 @@ class GeminiClient(LLMClient):
         except genai_errors.APIError as exc:
             code = int(getattr(exc, "code", 0) or 0)
             if code in _AUTH_HTTP:
-                raise LLMUnavailableError(f"gemini auth failed ({code}): check GEMINI_API_KEY") from exc
-            raise LLMError(f"gemini HTTP {code}: {str(exc)[:300]}", retryable=code in _RETRYABLE_HTTP) from exc
+                raise LLMUnavailableError(f"gemini auth failed ({code}): check GEMINI_API_KEY", status_code=code) from exc
+            raise LLMError(
+                f"gemini HTTP {code}: {str(exc)[:300]}", retryable=code in _RETRYABLE_HTTP, status_code=code or None
+            ) from exc
         except httpx.TransportError as exc:
             raise LLMError(f"gemini transport error: {exc}", retryable=True) from exc
+        meta = response.usage_metadata
+        if meta is None or meta.prompt_token_count is None:
+            self._record_tokens(None, None)
+        else:
+            # thinking tokens are billed as output
+            self._record_tokens(meta.prompt_token_count, (meta.candidates_token_count or 0) + (meta.thoughts_token_count or 0))
         text = response.text
         if not text:
             raise LLMError("gemini returned an empty response (possibly safety-blocked)", retryable=True)
@@ -66,10 +74,16 @@ class GroqClient(LLMClient):
         except httpx.TransportError as exc:
             raise LLMError(f"groq transport error: {exc}", retryable=True) from exc
         if resp.status_code in _AUTH_HTTP:
-            raise LLMUnavailableError(f"groq auth failed ({resp.status_code}): check GROQ_API_KEY")
+            raise LLMUnavailableError(f"groq auth failed ({resp.status_code}): check GROQ_API_KEY", status_code=resp.status_code)
         if resp.status_code >= 400:
-            raise LLMError(f"groq HTTP {resp.status_code}: {resp.text[:300]}", retryable=resp.status_code in _RETRYABLE_HTTP)
+            raise LLMError(
+                f"groq HTTP {resp.status_code}: {resp.text[:300]}",
+                retryable=resp.status_code in _RETRYABLE_HTTP,
+                status_code=resp.status_code,
+            )
         data = resp.json()
+        usage = data.get("usage") if isinstance(data, dict) else None
+        self._record_tokens(*usage_from_mapping(usage if isinstance(usage, dict) else None, "prompt_tokens", "completion_tokens"))
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:

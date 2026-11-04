@@ -15,7 +15,7 @@ filterwarnings = ["ignore::DeprecationWarning"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["app"]
+packages = ["app", "evals"]
 plugins = ["pydantic.mypy"]
 warn_unused_ignores = false
 

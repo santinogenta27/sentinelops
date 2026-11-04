@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     llm_timeout_s: float = Field(default=45.0, gt=0)
     llm_max_retries: int = Field(default=4, ge=0, le=10)
 
+    # --- Observability: LangSmith tracing (opt-in; see app/observability.py) ---
+    # Active only when LANGSMITH_TRACING=true AND LANGSMITH_API_KEY is set. Otherwise nothing is sent.
+    langsmith_tracing: bool = False
+    langsmith_api_key: SecretStr | None = None
+    langsmith_project: str = "sentinelops"
+    langsmith_endpoint: str | None = None  # e.g. https://eu.api.smith.langchain.com (EU region)
+
     # --- Embeddings ---
     embedding_provider: Literal["local", "gemini"] = "local"
     gemini_embedding_model: str = "gemini-embedding-001"

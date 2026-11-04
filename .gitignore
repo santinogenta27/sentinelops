@@ -7,4 +7,6 @@ __pycache__/
 data/*.db
 data/*.db-*
 data/chroma/
-reports/
+reports/*
+!reports/benchmarks/
+reports/benchmarks/.sessions/

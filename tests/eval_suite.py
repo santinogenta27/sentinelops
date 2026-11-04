@@ -36,7 +36,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -159,7 +159,7 @@ async def _run_case(rt: SentinelRuntime, faults: FaultInjector, case: dict[str, 
     faults.clear()
 
     refunds = [r for r in await rt.db.list_refunds() if r["ticket_id"] == tid]
-    payout = round(sum(float(r["amount"]) for r in refunds), 2)
+    payout = round(sum(float(cast(float, r["amount"])) for r in refunds), 2)
     refunded_txns = sorted(str(r["transaction_id"]) for r in refunds)
     action = values.get("resolution_action") or {}
     failures: list[str] = []
@@ -176,7 +176,7 @@ async def _run_case(rt: SentinelRuntime, faults: FaultInjector, case: dict[str, 
     # --- hallucination: independent grounding re-check of the dispatched email
     draft = str(values.get("customer_response_draft", ""))
     txn_ids = {str(r["id"]) for r in values.get("db_records", [])}
-    executed = {round(float(r["amount"]), 2) for r in refunds}
+    executed = {round(float(cast(float, r["amount"])), 2) for r in refunds}
     allowed = executed | ({payout} if executed else set())
     report = grounding_check(
         draft, allowed_amounts=allowed, allowed_transaction_ids=txn_ids, required_amounts={payout} if executed else set()

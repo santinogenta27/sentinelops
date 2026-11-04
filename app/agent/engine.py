@@ -27,6 +27,7 @@ DUPLICATE_WINDOW = timedelta(minutes=10)
 REFUND_WINDOW_DAYS: dict[str, int] = {"FREE": 14, "PRO": 30, "ENTERPRISE": 60}
 GATEWAY_FAILURE_STATES = frozenset({"FAILED", "TIMEOUT", "VOIDED"})
 CAPTURED_LEDGER_STATES = frozenset({"SUCCEEDED", "PARTIALLY_REFUNDED"})
+NOT_CAPTURED_LEDGER_STATES = frozenset({"FAILED", "PENDING"})
 MAX_LOOKBACK_DAYS = 365
 
 
@@ -84,19 +85,40 @@ def detect_fraud_signals(customer: CustomerRecord, txns: list[TransactionRecord]
     return findings
 
 
+def _claimed(dispute_amount: float | None, claimed_amounts: list[float] | None) -> list[float]:
+    out: list[float] = []
+    for a in ([dispute_amount] if dispute_amount is not None else []) + list(claimed_amounts or []):
+        if all(abs(a - b) >= 0.005 for b in out):
+            out.append(round(a, 2))
+    return out
+
+
 def select_targets(
-    txns: list[TransactionRecord], *, referenced_ids: list[str], dispute_amount: float | None
+    txns: list[TransactionRecord],
+    *,
+    referenced_ids: list[str],
+    dispute_amount: float | None,
+    claimed_amounts: list[float] | None = None,
 ) -> list[TransactionRecord]:
-    """Which transactions is the customer talking about? Explicit ids > amount match > most recent."""
+    """Which transactions is the customer talking about? Explicit ids > amount match > the only charge.
+
+    Never guesses: when the customer cites ids or amounts that are not on the ledger, or cites
+    nothing while several charges exist, no target is returned (the planner asks for clarification
+    instead of moving money on a charge the customer did not dispute).
+    """
     if referenced_ids:
-        by_id = [t for t in txns if t.id in referenced_ids]
-        if by_id:
-            return by_id
-    if dispute_amount is not None:
-        matched = [t for t in txns if abs(t.amount - dispute_amount) < 0.005]
-        if matched:
-            return [max(matched, key=lambda t: t.created_at)]
-    return [max(txns, key=lambda t: t.created_at)] if txns else []
+        return [t for t in txns if t.id in referenced_ids]
+    amounts = _claimed(dispute_amount, claimed_amounts)
+    if amounts:
+        targets: list[TransactionRecord] = []
+        for a in amounts:
+            matched = [t for t in txns if abs(t.amount - a) < 0.005]
+            if matched:
+                best = max(matched, key=lambda t: t.created_at)
+                if best not in targets:
+                    targets.append(best)
+        return targets
+    return list(txns) if len(txns) == 1 else []
 
 
 @dataclass(slots=True)
@@ -116,6 +138,7 @@ def investigate(
     referenced_ids: list[str],
     dispute_amount: float | None,
     now: datetime,
+    claimed_amounts: list[float] | None = None,
 ) -> Investigation:
     if customer is None:
         return Investigation(
@@ -128,19 +151,34 @@ def investigate(
     inv = Investigation(
         customer=customer,
         transactions=txns,
-        targets=select_targets(txns, referenced_ids=referenced_ids, dispute_amount=dispute_amount),
+        targets=select_targets(
+            txns, referenced_ids=referenced_ids, dispute_amount=dispute_amount, claimed_amounts=claimed_amounts
+        ),
         missing_references=[r for r in referenced_ids if r not in present],
     )
     if not txns:
         inv.findings.append(Finding(kind="NO_MATCHING_TRANSACTION", detail="no transactions in the lookback window"))
         return inv
+    if inv.missing_references:
+        inv.findings.append(
+            Finding(kind="REFERENCE_NOT_ON_ACCOUNT", detail=f"cited charges {inv.missing_references} are not on this account")
+        )
+    elif not inv.targets:
+        if _claimed(dispute_amount, claimed_amounts):
+            inv.findings.append(Finding(kind="AMOUNT_NOT_ON_LEDGER", detail="no charge matches the amounts the customer cited"))
+        else:
+            inv.findings.append(Finding(kind="TARGET_AMBIGUOUS", detail=f"{len(txns)} charges on file and none was specified"))
     inv.findings.extend(detect_duplicates(txns))
     inv.findings.extend(detect_gateway_sync_errors(txns))
     if category == "FRAUD_CLAIM":
         inv.findings.extend(detect_fraud_signals(customer, txns))
     window = REFUND_WINDOW_DAYS[customer.tier]
     for t in inv.targets:
-        if t.status == "REFUNDED" or t.refundable_amount <= 0:
+        if t.status in NOT_CAPTURED_LEDGER_STATES:
+            inv.findings.append(
+                Finding(kind="NOT_CAPTURED", transaction_ids=[t.id], detail=f"{t.id} was never captured (status {t.status})")
+            )
+        elif t.status == "REFUNDED" or t.refundable_amount <= 0:
             inv.findings.append(
                 Finding(kind="ALREADY_REFUNDED", transaction_ids=[t.id], detail=f"{t.id} already refunded ({t.refunded_amount:.2f})")
             )
@@ -262,7 +300,11 @@ def plan_resolution(
     lookback_days: int,
     tool_failure: bool,
     injection_detected: bool,
+    refund_requested: bool = False,
 ) -> PlanResult:
+    """``refund_requested``: the customer explicitly asked for money back. Without it, only the
+    policy-mandated refunds (duplicates, gateway errors, verified fraud) are made — a plain
+    in-window refund is never issued on, e.g., a cancellation request or a billing question."""
     if tool_failure:
         return PlanResult(
             ResolutionAction(
@@ -285,6 +327,17 @@ def plan_resolution(
     if inv.missing_references and lookback_days < MAX_LOOKBACK_DAYS:
         # Planner -> DBInspector loop: the customer cited charges we have not loaded yet.
         return PlanResult(action=None, requery_lookback_days=MAX_LOOKBACK_DAYS)
+    if inv.missing_references:
+        # POL-ID-001: the cited charge is not on this account (does not exist / belongs to someone else).
+        return PlanResult(
+            ResolutionAction(
+                action_type="REQUEST_INFO",
+                reason_code="REFERENCE_NOT_ON_ACCOUNT",
+                policy_refs=["POL-ID-001"],
+                secondary_actions=["CRM_NOTE"],
+                customer_facing_reason="We could not find the charge reference you mentioned on your account.",
+            )
+        )
 
     by_id = {t.id: t for t in inv.transactions}
     kinds = {f.kind for f in inv.findings}
@@ -292,10 +345,9 @@ def plan_resolution(
     risky_account = inv.customer.chargeback_count >= 3
 
     if category == "FRAUD_CLAIM":
-        flagged = [tid for f in inv.findings if f.kind == "FRAUD_SIGNAL" for tid in f.transaction_ids]
         disputed = {t.id for t in inv.targets}
-        if flagged and disputed & set(flagged):
-            flagged = [tid for tid in flagged if tid in disputed]  # refund only what the customer disputes
+        # Refund only charges the customer disputes AND that carry fraud signals — never another charge.
+        flagged = [tid for f in inv.findings if f.kind == "FRAUD_SIGNAL" for tid in f.transaction_ids if tid in disputed]
         if not flagged:
             return PlanResult(
                 ResolutionAction(
@@ -352,6 +404,19 @@ def plan_resolution(
                         customer_facing_reason="This charge has already been refunded in full; card refunds take 5-10 business days to settle.",
                     )
                 )
+            if "NOT_CAPTURED" in kinds:
+                return PlanResult(
+                    ResolutionAction(
+                        action_type="DENY",
+                        reason_code="CHARGE_NOT_CAPTURED",
+                        policy_refs=["POL-DUP-001"],
+                        secondary_actions=["CRM_NOTE"],
+                        customer_facing_reason=(
+                            "That payment attempt was declined and never charged, so you were only billed once; "
+                            "it may show briefly as pending on your statement."
+                        ),
+                    )
+                )
             if "OUT_OF_REFUND_WINDOW" in kinds:
                 window = REFUND_WINDOW_DAYS[inv.customer.tier]
                 return PlanResult(
@@ -363,8 +428,18 @@ def plan_resolution(
                         customer_facing_reason=f"The charge is outside the {window}-day refund window for your plan.",
                     )
                 )
+            if kinds & {"AMOUNT_NOT_ON_LEDGER", "TARGET_AMBIGUOUS"}:
+                return PlanResult(
+                    ResolutionAction(
+                        action_type="REQUEST_INFO",
+                        reason_code="CHARGE_NOT_IDENTIFIED",
+                        policy_refs=["POL-ID-001"],
+                        secondary_actions=["CRM_NOTE"],
+                        customer_facing_reason="We could not tell which charge your request refers to.",
+                    )
+                )
             eligible = [tid for f in inv.findings if f.kind == "ELIGIBLE_REFUND" for tid in f.transaction_ids]
-            if eligible:
+            if eligible and refund_requested:
                 refunds = {tid: by_id[tid].refundable_amount for tid in eligible}
                 policies.append("POL-REF-001")
                 reason_code = "WITHIN_REFUND_WINDOW"

@@ -147,7 +147,8 @@ class TestEngine:
         c = cust()
         txns = [txn("txn_aaaa0001", 19.99, timedelta(days=2))]
         inv = investigate(customer=c, txns=txns, category="REFUND_REQUEST", referenced_ids=["txn_aaaa0001"], dispute_amount=5000, now=NOW)
-        plan = plan_resolution(inv=inv, category="REFUND_REQUEST", lookback_days=90, tool_failure=False, injection_detected=True)
+        plan = plan_resolution(inv=inv, category="REFUND_REQUEST", lookback_days=90, tool_failure=False, injection_detected=True,
+                               refund_requested=True)
         assert plan.action is not None and plan.action.total_amount == 19.99
         assert "AMOUNT_MISMATCH" in {f.kind for f in inv.findings}
 
@@ -163,6 +164,30 @@ class TestEngine:
                           referenced_ids=["txn_old00001"], dispute_amount=None, now=NOW)
         plan = plan_resolution(inv=inv, category="REFUND_REQUEST", lookback_days=90, tool_failure=False, injection_detected=False)
         assert plan.action is None and plan.requery_lookback_days == 365
+
+    def test_never_refunds_a_charge_the_customer_did_not_cite(self) -> None:
+        txns = [txn("txn_aaaa0001", 40, timedelta(days=5)), txn("txn_aaaa0002", 20, timedelta(days=8))]
+        for refs, amount, kind in ((["txn_nope0001"], None, "REFERENCE_NOT_ON_ACCOUNT"), ([], 75.0, "AMOUNT_NOT_ON_LEDGER"),
+                                   ([], None, "TARGET_AMBIGUOUS")):
+            inv = investigate(customer=cust(), txns=txns, category="REFUND_REQUEST", referenced_ids=refs, dispute_amount=amount, now=NOW)
+            assert kind in {f.kind for f in inv.findings}
+            plan = plan_resolution(inv=inv, category="REFUND_REQUEST", lookback_days=365, tool_failure=False,
+                                   injection_detected=False, refund_requested=True)
+            assert plan.action is not None and plan.action.action_type == "REQUEST_INFO" and plan.action.total_amount == 0
+
+    def test_in_window_refund_requires_explicit_refund_intent(self) -> None:
+        inv = investigate(customer=cust(), txns=[txn("txn_aaaa0001", 49, timedelta(days=3))], category="REFUND_REQUEST",
+                          referenced_ids=[], dispute_amount=None, now=NOW)
+        no_intent = plan_resolution(inv=inv, category="REFUND_REQUEST", lookback_days=90, tool_failure=False, injection_detected=False)
+        assert no_intent.action is not None and no_intent.action.action_type == "ESCALATE"
+        assert heuristics.requests_refund("We want our $780 back") and not heuristics.requests_refund("Please cancel my plan")
+
+    def test_failed_charge_is_never_refunded(self) -> None:
+        txns = [txn("txn_aaaa0001", 59, timedelta(days=2)), txn("txn_aaaa0002", 59, timedelta(days=2) - timedelta(minutes=1), status="FAILED")]
+        inv = investigate(customer=cust(), txns=txns, category="DUPLICATE_CHARGE", referenced_ids=[], dispute_amount=59, now=NOW)
+        plan = plan_resolution(inv=inv, category="DUPLICATE_CHARGE", lookback_days=90, tool_failure=False, injection_detected=False,
+                               refund_requested=True)
+        assert plan.action is not None and plan.action.action_type == "DENY" and plan.action.total_amount == 0
 
     def test_risk_high_for_fraud_and_injection(self) -> None:
         r = assess_risk(customer=cust(), findings=[], category="FRAUD_CLAIM", injection_signals=[], payout_total=10,

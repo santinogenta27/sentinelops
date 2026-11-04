@@ -29,7 +29,7 @@ from app.agent.engine import (
     plan_resolution,
     requires_human_approval,
 )
-from app.agent.guardrails import detect_prompt_injection, fence_untrusted, find_emails
+from app.agent.guardrails import detect_prompt_injection, fence_untrusted, find_emails, find_money_amounts
 from app.config import Settings
 from app.db.database import utcnow
 from app.db.repository import Repository
@@ -320,6 +320,7 @@ class SentinelNodes:
         lookback = int(args.get("lookback_days", 90))
         tool_failure = state.get("last_tool_error") is not None
         injection = bool(state.get("injection_signals"))
+        raw = state["raw_message"]
 
         inv = investigate(
             customer=customer,
@@ -327,10 +328,16 @@ class SentinelNodes:
             category=category,
             referenced_ids=referenced,
             dispute_amount=state.get("dispute_amount"),
+            claimed_amounts=[a for a in find_money_amounts(raw) if a <= 1_000_000],
             now=now,
         )
         plan = plan_resolution(
-            inv=inv, category=category, lookback_days=lookback, tool_failure=tool_failure, injection_detected=injection
+            inv=inv,
+            category=category,
+            lookback_days=lookback,
+            tool_failure=tool_failure,
+            injection_detected=injection,
+            refund_requested=heuristics.requests_refund(raw),
         )
         if plan.action is None:
             new_args = {**args, "lookback_days": plan.requery_lookback_days or MAX_LOOKBACK_DAYS}

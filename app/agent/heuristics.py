@@ -40,6 +40,19 @@ _CATEGORY_KEYWORDS: dict[ClaimCategory, tuple[str, ...]] = {
     ),
 }
 _PRIORITY: tuple[ClaimCategory, ...] = ("FRAUD_CLAIM", "DUPLICATE_CHARGE", "REFUND_REQUEST")
+
+# Explicit "give me my money back" intent (EN/ES/FR/PT). Deliberately excludes a bare "cancel":
+# cancelling a subscription is not a refund request.
+_REFUND_INTENT = re.compile(
+    r"\brefund|\bmoney back\b|\breimburs|\breverse\b|\breembols|\bdevol[uv]|\bdevuelv|\brembours|\breembolso|\bestorno"
+    r"|\b(want|need|get|give)\b[^.\n]{0,40}(\bmoney\b|\$\s?\d|\bcharge\b|\bpayment\b)[^.\n]{0,20}\bback\b",
+    re.IGNORECASE,
+)
+
+
+def requests_refund(raw_message: str) -> bool:
+    """Did the customer explicitly ask for money back? Gates discretionary (in-window) refunds."""
+    return bool(_REFUND_INTENT.search(raw_message))
 _TXN_ID_RE = re.compile(TXN_ID_PATTERN)
 
 

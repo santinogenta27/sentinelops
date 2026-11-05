@@ -1,0 +1,42 @@
+# Render Blueprint: public SentinelOps demo on the free plan.
+#
+# DEMO_MODE=true makes the demo safe to expose: Stripe (dashboard + refund mirror), IMAP/SMTP, LLM providers,
+# Gemini embeddings and LangSmith are switched off and their secrets dropped even if set here by mistake;
+# payments and emails are simulated in the local SQLite ledger; requests are rate limited per client IP.
+# The ledger is seeded with the demo customers at every start (the free plan's disk is ephemeral, so each
+# restart or spin-down starts from a clean demo).
+services:
+  - type: web
+    name: sentinelops-demo
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.14
+      - key: DEMO_MODE
+        value: "true"
+      # Explicit even though DEMO_MODE already forces them: makes the intent visible in the dashboard.
+      - key: LLM_PROVIDER
+        value: mock
+      - key: EMBEDDING_PROVIDER
+        value: local
+      - key: STRIPE_MIRROR_REFUNDS
+        value: "false"
+      - key: ENABLE_EMAIL_LISTENER
+        value: "false"
+      - key: ENABLE_EMAIL_SENDER
+        value: "false"
+      - key: SUPERVISOR_EMAIL
+        value: billing-supervisor@sentinelops.demo
+      # Rate limits per visitor IP. Render runs behind Cloudflare, which sets True-Client-IP / CF-Connecting-IP.
+      - key: DEMO_CLIENT_IP_HEADERS
+        value: true-client-ip,cf-connecting-ip
+      - key: DEMO_RATE_LIMIT_PER_MINUTE
+        value: "300"
+      - key: DEMO_WRITE_LIMIT_PER_MINUTE
+        value: "20"

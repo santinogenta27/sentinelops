@@ -120,6 +120,10 @@ def _friendly(exc: Exception, kind: str) -> str:
     return f"{kind}: {type(exc).__name__}: {text[:200]}"
 
 
+class DemoModeError(PermissionError):
+    """An operation that would reach an external server was refused because DEMO_MODE is on."""
+
+
 class MailboxService:
     def __init__(
         self,
@@ -140,6 +144,8 @@ class MailboxService:
     # -------------------------------------------------------------- persistence
     async def load_and_apply(self) -> bool:
         """Startup: re-apply a mailbox connected from the cockpit in a previous run."""
+        if self.settings.demo_mode:
+            return False  # public demo: never reconnect a real mailbox
         saved = await self.db.get_setting(MAILBOX_KEY)
         if not isinstance(saved, dict) or not saved.get("connected"):
             return False
@@ -208,12 +214,18 @@ class MailboxService:
         out["ok"] = bool(out["imap"]["ok"]) and out["smtp"]["ok"] is not False
         return out
 
+    def _refuse_in_demo(self) -> None:
+        if self.settings.demo_mode:
+            raise DemoModeError("mailbox connections are disabled in demo mode (email is simulated)")
+
     async def test(self, cfg: MailboxConfigIn) -> dict[str, Any]:
+        self._refuse_in_demo()
         password = self._password_for(cfg)
         return await asyncio.wait_for(asyncio.to_thread(self._check_sync, cfg, password), timeout=45)
 
     async def save(self, cfg: MailboxConfigIn) -> dict[str, Any]:
         """Validate against the real servers, persist, apply live and (re)start the listener."""
+        self._refuse_in_demo()
         password = self._password_for(cfg)
         check = await asyncio.wait_for(asyncio.to_thread(self._check_sync, cfg, password), timeout=45)
         if not check["ok"]:

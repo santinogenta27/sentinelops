@@ -105,6 +105,15 @@
   </div>
 </header>
 
+<!-- ============================== DEMO MODE BANNER (DEMO_MODE=true only) ============================== -->
+<div id="demo-banner" class="hidden max-w-[1680px] mx-auto px-4 pt-4" role="status">
+  <div class="rounded-xl border border-sky-500/50 bg-sky-500/10 px-4 py-2.5 flex flex-wrap items-center gap-2 text-sm text-sky-100">
+    <i data-lucide="flask-conical" class="w-4 h-4 text-sky-300"></i>
+    <b id="demo-banner-text">Demo mode: simulated payments and email</b>
+    <span class="text-xs text-sky-200/80">Nothing leaves this server: no real charges or refunds, no emails sent, deterministic engine instead of an LLM. Try a scenario on the left.</span>
+  </div>
+</div>
+
 <!-- ============================== SUPERVISOR ALERT BANNER ============================== -->
 <div id="sup-banner" class="hidden max-w-[1680px] mx-auto px-4 pt-4" role="alert" aria-live="assertive">
   <div class="alert-glow rounded-xl border border-amber-500/60 bg-gradient-to-r from-amber-500/20 via-amber-500/10 to-transparent px-4 py-3 flex flex-wrap items-center gap-3">
@@ -904,7 +913,27 @@ $("#btn-autopilot").onclick = async () => {
 
 // ---------------------------------------------------------------- mailbox (connect from UI)
 let mailCfg = null;
+let demoMode = false;
+async function loadDemo() {
+  try {
+    const d = await api("/api/demo");
+    demoMode = !!d.demo_mode;
+    if (!demoMode) return;
+    $("#demo-banner-text").textContent = d.banner;
+    $("#demo-banner").classList.remove("hidden");
+    $("#btn-mailcfg").classList.add("hidden");  // real mailboxes cannot be connected in the public demo
+    loadMailStatus();
+    icons();
+  } catch (e) { /* older server without /api/demo: not a demo */ }
+}
 async function loadMailStatus() {
+  if (demoMode) {
+    const b = $("#hdr-mail");
+    b.className = "pill bg-sky-500/15 text-sky-300";
+    b.textContent = "✉ Email simulated (demo)";
+    b.title = "Demo mode: replies and supervisor alerts are recorded in the outbox, never sent";
+    return;
+  }
   try { mailCfg = await api("/api/email/config"); } catch { return; }
   const b = $("#hdr-mail");
   const l = mailCfg.listener || {};
@@ -1011,7 +1040,7 @@ $("#mc-disconnect").onclick = async () => {
   loadMailStatus(); loadHealth();
 };
 $("#btn-mailcfg").onclick = openMailCfg;
-$("#hdr-mail").onclick = openMailCfg;
+$("#hdr-mail").onclick = () => { if (!demoMode) openMailCfg(); };
 $$("[data-mclose]").forEach(x => x.onclick = () => $("#mailcfg").classList.add("hidden"));
 
 // ---------------------------------------------------------------- stripe live dashboard
@@ -1211,7 +1240,7 @@ function connectSSE() {
 
 // ---------------------------------------------------------------- boot
 drawGraph(); icons();
-loadHealth(); loadMailStatus(); loadScenarios(); loadTickets(); loadApprovals(); refreshOutboxCache(); connectSSE();
+loadDemo(); loadHealth(); loadMailStatus(); loadScenarios(); loadTickets(); loadApprovals(); refreshOutboxCache(); connectSSE();
 setInterval(loadHealth, 30000);
 setInterval(loadMailStatus, 5000);
 </script>

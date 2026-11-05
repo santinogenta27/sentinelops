@@ -96,3 +96,24 @@ SCENARIOS: list[Scenario] = [
         "expectation": "Cannot identify customer → request info, no money moves",
     },
 ]
+
+
+_BY_KEY = {s["key"]: s for s in SCENARIOS}
+
+# Public demo (DEMO_MODE=true): five one-click scenarios. Outside demo mode the cockpit keeps SCENARIOS.
+DEMO_SCENARIOS: list[Scenario] = [
+    _BY_KEY["duplicate_small"],
+    _BY_KEY["fraud"],
+    _BY_KEY["injection"],
+    _BY_KEY["refund_late"],
+    {
+        "key": "spanish_refund",
+        "title": "Reembolso en español · $29",
+        "message": (
+            "Hola, quisiera el reembolso de mi suscripción Pro Monthly de $29 de la semana pasada, "
+            "no nos sirvió. erin@designhub.co"
+        ),
+        "customer_email": None,
+        "expectation": "Spanish ticket understood → in-window auto refund",
+    },
+]

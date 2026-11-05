@@ -6,10 +6,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+DEMO_BANNER = "Demo mode: simulated payments and email"
 
 
 class Settings(BaseSettings):
@@ -18,6 +20,19 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    # --- Public demo (see _enforce_demo_mode) ---
+    # DEMO_MODE=true: nothing leaves the server (no Stripe, IMAP/SMTP, LLM, Gemini embeddings or LangSmith,
+    # whatever else is configured), a banner is shown and requests are rate limited per client IP.
+    demo_mode: bool = False
+    demo_rate_limit_per_minute: int = Field(default=300, ge=1, le=100_000)  # every request, per IP
+    demo_write_limit_per_minute: int = Field(default=20, ge=1, le=10_000)  # POST/PUT/PATCH/DELETE, per IP
+    demo_max_body_bytes: int = Field(default=65_536, ge=1_024, le=10_000_000)
+    # Client IP for rate limiting. First, headers set by a trusted edge proxy, in order (comma-separated, e.g.
+    # "true-client-ip,cf-connecting-ip" behind Cloudflare/Render); then the N-th X-Forwarded-For entry from the
+    # right (N trusted proxies append to it; 0 = ignore it); then the TCP peer.
+    demo_client_ip_headers: str = ""
+    demo_trusted_proxy_hops: int = Field(default=1, ge=0, le=5)
 
     # --- LLM ---
     llm_provider: Literal["gemini", "groq", "mock"] = "mock"
@@ -85,6 +100,31 @@ class Settings(BaseSettings):
 
     # --- Storage ---
     data_dir: Path = PROJECT_ROOT / "data"
+
+    @model_validator(mode="after")
+    def _enforce_demo_mode(self) -> Settings:
+        """Public demo: switch off every integration that talks to the outside world and drop its secrets.
+
+        Applied whatever the environment says, so a demo deployment that accidentally inherits real keys
+        still cannot charge, refund, email, call an LLM or ship traces. No-op when demo_mode is false.
+        """
+        if not self.demo_mode:
+            return self
+        self.llm_provider = "mock"
+        self.gemini_api_key = None
+        self.groq_api_key = None
+        self.embedding_provider = "local"
+        self.langsmith_tracing = False
+        self.langsmith_api_key = None
+        self.stripe_api_key = None
+        self.stripe_mirror_refunds = False
+        self.enable_email_listener = False
+        self.enable_email_sender = False
+        self.imap_user = None
+        self.imap_password = None
+        self.smtp_user = None
+        self.smtp_password = None
+        return self
 
     @property
     def subject_keywords(self) -> list[str]:

@@ -178,6 +178,7 @@ Note: the test balance can go negative, because Stripe does not return its fee o
 
 | Method | Route | Description |
 |---|---|---|
+| `GET` | `/health` · `/api/demo` | Liveness for the platform health check · demo-mode status and banner |
 | `POST` | `/api/tickets` | Creates a ticket (202) and runs the agent in the background |
 | `GET` | `/api/tickets` · `/api/tickets/{id}` · `/api/tickets/{id}/events` | List · full checkpoint state · event history |
 | `POST` | `/api/tickets/{id}/decision` | HITL decision `{approved, reviewer, reason}` (409 if not waiting) |
@@ -297,6 +298,37 @@ Seed customers (`app/db/seed.py`, dates relative to the seed time): `alice@acme-
 timeout $59), `erin@designhub.co` ($29 within window), `frank@oldmail.net` (outside window), `grace@lumen.io`
 (already refunded), `mallory@protonmail.com` (new account, 3 chargebacks), `henry@bigretail.com` ($1,250 and a
 charge from 200 days ago). The cockpit has one button per scenario.
+
+## Public demo (`DEMO_MODE`) and deployment on Render
+
+`DEMO_MODE=true` turns the app into a public sandbox where **nothing leaves the server**. It is off by default;
+without it the app behaves exactly as described above.
+
+| With `DEMO_MODE=true` | |
+|---|---|
+| LLM | forced to `mock` (deterministic engine); Gemini/Groq keys dropped; embeddings `local` |
+| Stripe | dashboard and refund mirror off; `STRIPE_API_KEY` dropped. Refunds exist only in the local SQLite ledger |
+| Email | IMAP listener and SMTP sender off, credentials dropped. A mailbox saved earlier is not reconnected, and connecting or testing one from the cockpit returns `403`. Customer replies and supervisor alerts are recorded (outbox / `simulated`), never sent |
+| Tracing | LangSmith off |
+| Cockpit | banner *"Demo mode: simulated payments and email"*; five one-click scenarios (duplicate charge, fraud, prompt injection, outside the refund window, Spanish) |
+| Abuse limits | per client IP: `DEMO_RATE_LIMIT_PER_MINUTE` (all requests, default 300) and `DEMO_WRITE_LIMIT_PER_MINUTE` (POST/PUT/PATCH/DELETE, default 20) → `429` with `Retry-After`; request bodies above `DEMO_MAX_BODY_BYTES` (64 KB) → `413`. `/health` is exempt |
+
+These are enforced in `Settings` itself (`app/config.py`), so a demo deployment that inherits real keys by
+mistake still cannot use them. `tests/test_demo_mode.py` runs the scenarios, the email simulator and the inbound
+webhook with every integration configured and fails if any non-loopback connection or DNS lookup is attempted.
+
+**Client IP for rate limiting.** Behind a proxy, the last `X-Forwarded-For` entry is the proxy itself, and the
+entries to its left can be forged by the client. Set `DEMO_CLIENT_IP_HEADERS` to the headers your edge sets.
+Render sits behind Cloudflare, so `render.yaml` uses `true-client-ip,cf-connecting-ip`. Otherwise
+`DEMO_TRUSTED_PROXY_HOPS` (default 1) selects the N-th `X-Forwarded-For` entry from the right.
+
+**Render** ([`render.yaml`](render.yaml)) deploys a free Python web service:
+- `uvicorn app.main:app --host 0.0.0.0 --port $PORT`;
+- health check `GET /health`, which returns 200 once the runtime is up;
+- `DEMO_MODE=true`.
+
+The SQLite ledger is seeded with the demo customers at startup. The free plan's filesystem is ephemeral, so
+every restart, deploy or 15-minute idle spin-down starts from a clean demo.
 
 ## Author
 

@@ -42,6 +42,8 @@ from app.services.controls import RuntimeControls
 logger = logging.getLogger("sentinelops.runtime")
 
 Event = dict[str, Any]
+# States where a run comes to rest; they are only exposed once _drive has published them (see get_view).
+RESTING_STATUSES: frozenset[str] = TERMINAL_STATUSES | {"AWAITING_APPROVAL"}
 STREAM_MODES: list[StreamMode] = ["tasks", "updates"]
 
 
@@ -210,8 +212,22 @@ class SentinelRuntime:
         return self._locks.setdefault(ticket_id, asyncio.Lock())
 
     async def emit(self, ticket_id: str, type_: str, node: str | None, payload: dict[str, object]) -> None:
+        self.bus.publish(await self._record_event(ticket_id, type_, node, payload))
+
+    async def _record_event(self, ticket_id: str, type_: str, node: str | None, payload: dict[str, object]) -> Event:
         event_id = await self.db.append_event(ticket_id, type_, node, payload)
-        self.bus.publish({"id": event_id, "ticket_id": ticket_id, "type": type_, "node": node, "ts": iso(utcnow()), "payload": payload})
+        return {"id": event_id, "ticket_id": ticket_id, "type": type_, "node": node, "ts": iso(utcnow()), "payload": payload}
+
+    async def _publish_outcome(self, ticket_id: str, values: dict[str, Any], status: str, type_: str, payload: dict[str, object]) -> None:
+        """Publish where a run comes to rest (paused or finished) as one step.
+
+        The closing event is persisted first, then the ticket row — the publication point that get_view and
+        pending_approvals trust — and only then is the event pushed to SSE subscribers. Whoever sees the
+        published status finds its closing event, and whoever receives the event finds the status published.
+        """
+        event = await self._record_event(ticket_id, type_, None, payload)
+        await self.db.upsert_ticket(ticket_id, values["raw_message"], values.get("customer_email"), status, _summarise(values))
+        self.bus.publish(event)
 
     async def _drive(self, ticket_id: str, graph_input: AgentState | Command[Any] | None) -> dict[str, Any]:
         config = self._config(ticket_id)
@@ -239,32 +255,32 @@ class SentinelRuntime:
         snap = await self.graph.aget_state(config)
         values = dict(snap.values)
         status = str(values.get("execution_status", "FAILED"))
-        await self.db.upsert_ticket(ticket_id, values["raw_message"], values.get("customer_email"), status, _summarise(values))
+        if tuple(snap.next) == ("human_gate",):
+            ap = self.controls.autopilot
+            verdict = autopilot_verdict(values, enabled=ap.enabled, max_usd=ap.max_usd)
+            if verdict.eligible:
+                # Zero-touch: the interrupt was raised (auditable) and is resumed by policy, not a person.
+                # It is never published as awaiting approval (the ticket row is not moved to AWAITING_APPROVAL).
+                decision = HumanDecision(
+                    approved=True,
+                    reviewer=AUTOPILOT_REVIEWER,
+                    reason=f"policy-compliant payout ${verdict.amount:,.2f} ≤ auto-pilot ceiling ${ap.max_usd:,.2f}",
+                )
+                await self.emit(
+                    ticket_id, "autopilot_approved", "human_gate",
+                    {"amount": verdict.amount, "ceiling": ap.max_usd, "channel": values.get("channel") or "web"},
+                )
+                await self.emit(ticket_id, "decision", "human_gate", decision.model_dump(mode="json"))
+                return await self._drive(ticket_id, Command(resume=decision.model_dump(mode="json")))
+            # The supervisor alert is created before the pause is published, so a pending approval is never
+            # visible without its alert.
+            if ap.enabled:
+                await self.emit(ticket_id, "autopilot_blocked", "human_gate", {"reasons": verdict.reasons})
+            await self._alert_supervisor(ticket_id, values)
         if snap.next:
-            if tuple(snap.next) == ("human_gate",):
-                ap = self.controls.autopilot
-                verdict = autopilot_verdict(values, enabled=ap.enabled, max_usd=ap.max_usd)
-                if verdict.eligible:
-                    # Zero-touch: the interrupt was raised (auditable) and is resumed by policy, not a person.
-                    decision = HumanDecision(
-                        approved=True,
-                        reviewer=AUTOPILOT_REVIEWER,
-                        reason=f"policy-compliant payout ${verdict.amount:,.2f} ≤ auto-pilot ceiling ${ap.max_usd:,.2f}",
-                    )
-                    await self.emit(
-                        ticket_id, "autopilot_approved", "human_gate",
-                        {"amount": verdict.amount, "ceiling": ap.max_usd, "channel": values.get("channel") or "web"},
-                    )
-                    await self.emit(ticket_id, "decision", "human_gate", decision.model_dump(mode="json"))
-                    return await self._drive(ticket_id, Command(resume=decision.model_dump(mode="json")))
-                await self.emit(ticket_id, "paused", None, {"next": list(snap.next), "status": status})
-                if ap.enabled:
-                    await self.emit(ticket_id, "autopilot_blocked", "human_gate", {"reasons": verdict.reasons})
-                await self._alert_supervisor(ticket_id, values)
-            else:
-                await self.emit(ticket_id, "paused", None, {"next": list(snap.next), "status": status})
+            await self._publish_outcome(ticket_id, values, status, "paused", {"next": list(snap.next), "status": status})
         else:
-            await self.emit(ticket_id, "run_completed", None, {"status": status})
+            await self._publish_outcome(ticket_id, values, status, "run_completed", {"status": status})
         return values
 
     async def _alert_supervisor(self, ticket_id: str, values: dict[str, Any]) -> None:
@@ -410,6 +426,15 @@ class SentinelRuntime:
                 if isinstance(itr.value, dict):
                     pending = itr.value
         values = dict(snap.values)
+        published = str(row["execution_status"]) if row is not None else None
+        live = values.get("execution_status")
+        if (pending is not None or live in RESTING_STATUSES) and published != live:
+            # LangGraph checkpoints a pause or the final state before _drive publishes it (supervisor alert,
+            # closing event, ticket row). Until then report the published status, never a half-published
+            # approval or outcome. Auto-Pilot resumptions are never published as awaiting approval at all.
+            pending = None
+            if published is not None:
+                values["execution_status"] = published
         return TicketView.model_validate(
             {
                 **values,

@@ -19,15 +19,16 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app import __version__
 from app.agent.graph import EDGES, NODES
-from app.config import PROJECT_ROOT, get_settings
+from app.config import DEMO_BANNER, PROJECT_ROOT, get_settings
 from app.db.seed import seed_database
+from app.demo import DemoGuardMiddleware
 from app.integrations.email_inbound import InboundEmailPayload, from_webhook_payload
 from app.integrations.imap_listener import EmailListener
 from app.models.schemas import DecisionRequest, HumanDecision, TicketCreate, TicketCreated, TicketView
-from app.scenarios import SCENARIOS
+from app.scenarios import DEMO_SCENARIOS, SCENARIOS
 from app.services.controls import AutopilotState, AutopilotUpdate
 from app.services.inbound_email import InboundEmailService
-from app.services.mailbox import MailboxConfigIn, MailboxService
+from app.services.mailbox import DemoModeError, MailboxConfigIn, MailboxService
 from app.services.runtime import InvalidTransitionError, SentinelRuntime, TicketNotFoundError
 
 for _stream in (sys.stdout, sys.stderr):  # Windows consoles default to cp1252
@@ -58,6 +59,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         listener.start()
         logger.info("IMAP listener started (%s, folder=%s)", settings.imap_host, settings.imap_folder)
     recovered = await runtime.recover_inflight()
+    if settings.demo_mode:
+        logger.info("DEMO_MODE on: Stripe, IMAP/SMTP, LLM providers and tracing are disabled; per-IP rate limits active")
     logger.info("SentinelOps ready · llm=%s · recovered=%s", runtime.llm_status(), recovered)
     try:
         yield
@@ -72,6 +75,8 @@ app = FastAPI(
     description="Enterprise Autonomous Financial Dispute & Agentic Resolution Engine",
     lifespan=lifespan,
 )
+# Public-demo guard (per-IP rate limits, body-size cap). A pass-through unless DEMO_MODE=true.
+app.add_middleware(DemoGuardMiddleware, settings=get_settings)
 
 
 def get_runtime(request: Request) -> SentinelRuntime:
@@ -115,6 +120,25 @@ async def cockpit() -> FileResponse:
 
 
 # ----------------------------------------------------------------------- system
+@app.get("/health", include_in_schema=False)
+async def liveness(request: Request) -> JSONResponse:
+    """Platform health check (Render): 200 once the runtime is up and the ledger is seeded."""
+    ready = getattr(request.app.state, "runtime", None) is not None
+    return JSONResponse({"status": "ok" if ready else "starting"}, status_code=200 if ready else 503)
+
+
+@app.get("/api/demo")
+async def demo_info(rt: RuntimeDep) -> dict[str, object]:
+    s = rt.settings
+    if not s.demo_mode:
+        return {"demo_mode": False}
+    return {
+        "demo_mode": True,
+        "banner": DEMO_BANNER,
+        "limits": {"requests_per_minute": s.demo_rate_limit_per_minute, "writes_per_minute": s.demo_write_limit_per_minute},
+    }
+
+
 @app.get("/api/health")
 async def health(rt: RuntimeDep) -> dict[str, object]:
     s = rt.settings
@@ -174,6 +198,8 @@ async def email_test_connection(body: MailboxConfigIn, mailbox: MailboxDep) -> d
     """Log in to the real IMAP (and SMTP) server with the given credentials. Nothing is saved."""
     try:
         return await mailbox.test(body)
+    except DemoModeError as exc:
+        raise HTTPException(403, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except TimeoutError as exc:
@@ -185,6 +211,8 @@ async def email_save_config(body: MailboxConfigIn, mailbox: MailboxDep) -> dict[
     """Validate, persist and apply the mailbox live; (re)starts the IMAP listener without a restart."""
     try:
         return await mailbox.save(body)
+    except DemoModeError as exc:
+        raise HTTPException(403, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except TimeoutError as exc:
@@ -292,8 +320,8 @@ async def graph_topology() -> dict[str, object]:
 
 
 @app.get("/api/scenarios")
-async def scenarios() -> list[dict[str, object]]:
-    return [dict(s) for s in SCENARIOS]
+async def scenarios(rt: RuntimeDep) -> list[dict[str, object]]:
+    return [dict(s) for s in (DEMO_SCENARIOS if rt.settings.demo_mode else SCENARIOS)]
 
 
 # ---------------------------------------------------------------------- tickets

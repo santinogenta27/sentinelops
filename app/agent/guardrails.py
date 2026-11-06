@@ -9,11 +9,12 @@ _INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (name, re.compile(pattern, re.IGNORECASE))
     for name, pattern in (
         ("override_instructions", r"\b(ignore|disregard|forget|override)\b[^.\n]{0,40}\b(instruction|rule|polic|guideline|prompt|directive)"),
-        ("role_hijack", r"\b(you are now|act as|pretend (to be|you are)|from now on you|new persona)\b"),
+        ("role_hijack", r"\b(you are now|act as(?! soon)|pretend (to be|you are)|from now on you|new persona)\b"),
         ("privileged_mode", r"\b(developer|admin|god|debug|maintenance|sudo|root)\s*mode\b|\bjailbreak\b|\bDAN\b"),
         ("system_prompt_probe", r"\b(system prompt|hidden instructions|reveal (your|the) (prompt|instructions))\b"),
         ("fake_authorization", r"\b(already|pre-?)\s*(been\s+)?(approved|authori[sz]ed)\b|\bapproved by (a |the |my )?(supervisor|manager|admin|ceo|billing)"),
-        ("approval_bypass", r"\b(skip|bypass|circumvent|disable|without)\b[^.\n]{0,30}\b(approval|human|review|verification|supervisor|checks?)\b"),
+        # "without my approval" is a customer describing an unauthorised charge, not a request to skip ours.
+        ("approval_bypass", r"\b(skip|bypass|circumvent|disable|without(?!\s+(?:my|our)\b))\b[^.\n]{0,30}\b(approval|human|review|verification|supervisor|checks?)\b"),
         ("markup_injection", r"(<\s*/?\s*(system|assistant|instructions?)\s*>|\[/?INST\]|###\s*(system|instruction)|```\s*system)"),
         ("tool_coercion", r"\b(call|execute|invoke|run)\b[^.\n]{0,20}\b(tool|function|stripe|refund api|create_refund)\b"),
         # Text imitating the structure of a chat/system message: role keys in JSON/YAML/kwargs, chat
@@ -42,7 +43,7 @@ _INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ),
         (
             "approval_bypass_i18n",
-            r"\b(sin|saltea\w*|salta\w*|omit\w*|evit\w*|sans|contourn\w*|sem|pular|ohne|umgeh\w*)\b[^.\n]{0,30}"
+            r"\b(sin(?!\s+(?:mi|nuestra)\b)|saltea\w*|salta\w*|omit\w*|evit\w*|sans|contourn\w*|sem|pular|ohne|umgeh\w*)\b[^.\n]{0,30}"
             r"\b(aprobaci[oó]n|revisi[oó]n|verificaci[oó]n|supervisor\w*|human[oa]s?|validation|v[eé]rification|approbation|"
             r"humaine?|aprova[cç][aã]o|revis[aã]o|pr[uü]fung|freigabe|genehmigung)\b",
         ),
@@ -57,10 +58,20 @@ _INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     )
 )
 
+# Both number conventions: 1,250.00 (en) and 1.250,00 (es/pt/de). A separator followed by exactly three
+# digits groups thousands; one followed by one or two digits starts the decimals.
+_NUMBER = r"\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?(?!\d)|\d+(?:[.,]\d{1,2})?(?!\d)"
+_NUMBER_RE = re.compile(_NUMBER)
 _MONEY_RE = re.compile(
-    r"(?:(?:US)?\$|USD\s?)\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?|(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?\s?(?:USD|dollars?|bucks)\b",
+    rf"(?:(?:US|R|AR)?\$|USD\s?)\s?({_NUMBER})|({_NUMBER})\s?(?:USD|dollars?|d[oó]lares|bucks)\b",
     re.IGNORECASE,
 )
+_DECIMALS_RE = re.compile(r"(.*)[.,](\d{1,2})")
+_FOREIGN_MONEY_RE = re.compile(
+    rf"(?:€|£|\b(?:EUR|GBP|BRL|ARS|MXN)\b|\bAR\$|\bR\$)\s?(?:{_NUMBER})|(?:{_NUMBER})\s?(?:€|£|euros?\b|pesos?\b|reais\b|EUR\b|GBP\b|BRL\b|ARS\b|MXN\b)",
+    re.IGNORECASE,
+)
+_USD_MONEY_RE = re.compile(rf"(?<![A-Za-z])(?:US)?\$\s?(?:{_NUMBER})|\bUSD\b|\bdollars?\b|\bd[oó]lares\b|\bbucks\b", re.IGNORECASE)
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}")
 _TXN_REF_RE = re.compile(r"\btxn[\s_\-#:]*[A-Za-z0-9][A-Za-z0-9_\-]{2,40}\b", re.IGNORECASE)
 _STRICT_TXN_RE = re.compile(r"\btxn_[A-Za-z0-9]{4,32}\b")
@@ -86,18 +97,32 @@ def fence_untrusted(text: str, label: str = "CUSTOMER_MESSAGE") -> str:
     return f"<<<{label}>>>\n{safe}\n<<<END_{label}>>>"
 
 
+def parse_amount(token: str) -> float:
+    """``1.250,00`` / ``1,250.00`` / ``1.250`` -> 1250.0; ``149,00`` / ``149.00`` -> 149.0; ``1.25`` -> 1.25."""
+    decimals = _DECIMALS_RE.fullmatch(token)
+    whole, cents = (decimals.group(1), decimals.group(2)) if decimals else (token, "0")
+    return round(float(re.sub(r"[.,]", "", whole)) + float(f"0.{cents}"), 2)
+
+
 def find_money_amounts(text: str) -> list[float]:
     amounts: list[float] = []
     for m in _MONEY_RE.finditer(text):
-        whole = m.group(1) or m.group(3)
-        cents = m.group(2) or m.group(4) or "0"
-        if whole is None:
-            continue
+        token = m.group(1) or m.group(2)
         try:
-            amounts.append(round(float(whole.replace(",", "")) + float(f"0.{cents}"), 2))
+            amounts.append(parse_amount(token))
         except ValueError:
             continue
     return amounts
+
+
+def only_foreign_amounts(text: str) -> bool:
+    """The customer quotes amounts in another currency only, so they cannot be compared with the USD ledger."""
+    return bool(_FOREIGN_MONEY_RE.search(text)) and not _USD_MONEY_RE.search(text)
+
+
+def literal_numbers(text: str) -> set[float]:
+    """Every number written in ``text``, normalised (anti-hallucination check for extracted amounts)."""
+    return {parse_amount(n) for n in _NUMBER_RE.findall(text)}
 
 
 def find_emails(text: str) -> list[str]:
@@ -130,15 +155,26 @@ class GroundingReport:
         return max(0.0, 1.0 - 0.2 * len(self.issues))
 
 
+_REFUND_CLAIMS = re.compile(
+    r"\bwe(?:'ve| have)? (?:issued|processed|refunded|sent|returned)\b|\byour refund (?:has been|was|is)\b|\byou (?:will|'ll) (?:receive|get) (?:a|your) refund\b"
+    r"|\bhemos (?:emitido|procesado|reembolsado|devuelto|reintegrado)\b|\btu (?:reembolso|reintegro) (?:fue|ha sido|est[aá])\b|\brecibir[aá]s (?:un|tu) (?:reembolso|reintegro)\b",
+    re.IGNORECASE,
+)
+
+
 def grounding_check(
     text: str,
     *,
     allowed_amounts: set[float],
     allowed_transaction_ids: set[str],
     required_amounts: set[float],
+    refund_executed: bool = True,
 ) -> GroundingReport:
     """Verify a customer-facing draft only states facts supported by the executed action."""
     report = GroundingReport()
+    if not refund_executed and _REFUND_CLAIMS.search(text):
+        report.critical = True
+        report.issues.append("claims a refund that was not executed")
     stated = set(find_money_amounts(text))
     unsupported = {a for a in stated if not any(abs(a - b) < 0.005 for b in allowed_amounts)}
     if unsupported:

@@ -37,6 +37,8 @@ class InboundEmailService:
         if is_own_outbound(email.message_id):
             raise ValueError("refusing to ingest a reply sent by SentinelOps itself (loop protection)")
         tid = new_ticket_id()
+        # Looked up before this email is recorded. Only a reply from the same sender continues a case.
+        parent = await rt.db.find_clarification(email.from_address, email.thread_ids)
         existing = await rt.db.record_inbound_email(
             message_id=email.message_id,
             ticket_id=tid,
@@ -62,7 +64,16 @@ class InboundEmailService:
             subject=email.subject or None,
             message_id=email.message_id,
             sender_alias_of=alias_of,
+            identity_unverified=email.sender_auth_failed,
+            parent_ticket_id=str(parent["ticket_id"]) if parent else None,
+            clarification_round=int(str(parent["clarification_round"])) + 1 if parent else 0,
         )
+        text = email.ticket_text()
+        if parent:
+            # What this customer wrote earlier in this thread, and nothing from any other ticket.
+            text = f"{text}\n\n[Earlier message from this customer in this thread]\n{parent['raw_message']}"[:6000]
+            await rt.db.mark_case_continued(str(parent["ticket_id"]), continued_by=tid)
+            await rt.emit(str(parent["ticket_id"]), "clarification_received", None, {"continued_by": tid})
         await rt.emit(
             tid,
             "email_received",
@@ -79,7 +90,7 @@ class InboundEmailService:
         )
         customer_email = customer.email if customer else None
         if wait:
-            await rt.run_ticket(email.ticket_text(), customer_email, ticket_id=tid, meta=meta)
+            await rt.run_ticket(text, customer_email, ticket_id=tid, meta=meta)
         else:
-            rt.submit(email.ticket_text(), customer_email, ticket_id=tid, meta=meta)
+            rt.submit(text, customer_email, ticket_id=tid, meta=meta)
         return IngestResult(tid, False, email.message_id, customer is not None)

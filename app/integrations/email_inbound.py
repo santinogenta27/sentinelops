@@ -47,6 +47,8 @@ class InboundEmailPayload(BaseModel):
         max_length=500,
         validation_alias=AliasChoices("message_id", "Message-Id", "Message-ID", "message-id", "MessageID"),
     )
+    in_reply_to: str | None = Field(default=None, max_length=500, validation_alias=AliasChoices("in_reply_to", "In-Reply-To", "in-reply-to"))
+    references: str | None = Field(default=None, max_length=4000, validation_alias=AliasChoices("references", "References"))
     source: Literal["webhook", "simulator"] = "webhook"
 
 
@@ -57,6 +59,8 @@ class InboundEmail(StrictModel):
     body: Annotated[str, StringConstraints(max_length=MAX_BODY_CHARS)]
     message_id: Annotated[str, StringConstraints(min_length=3, max_length=500)]
     source: InboundSource
+    sender_auth_failed: bool = False  # the receiving server reported the From address as forged
+    thread_ids: list[str] = Field(default_factory=list)  # Message-Ids this email says it is replying to
 
     def ticket_text(self) -> str:
         """What the agent reads: subject + cleaned body (the From header is identity, not content)."""
@@ -89,8 +93,22 @@ def synthetic_message_id(from_address: str, subject: str, body: str) -> str:
     return f"<gen-{digest}@sentinelops>"
 
 
+_MESSAGE_ID_RE = re.compile(r"<[^<>\s]{3,300}>")
+
+
+def thread_ids_from(in_reply_to: str | None, references: str | None) -> list[str]:
+    return list(dict.fromkeys(_MESSAGE_ID_RE.findall(f"{in_reply_to or ''} {references or ''}")))[:20]
+
+
 def build_inbound_email(
-    *, raw_from: str, subject: str, body: str, message_id: str | None, source: InboundSource
+    *,
+    raw_from: str,
+    subject: str,
+    body: str,
+    message_id: str | None,
+    source: InboundSource,
+    in_reply_to: str | None = None,
+    references: str | None = None,
 ) -> InboundEmail:
     name, address = parseaddr(raw_from)
     email_address = normalise_email(address or raw_from)
@@ -107,6 +125,7 @@ def build_inbound_email(
         body=clean_body or clean_subject,
         message_id=(message_id or "").strip() or synthetic_message_id(email_address, clean_subject, clean_body),
         source=source,
+        thread_ids=thread_ids_from(in_reply_to, references),
     )
 
 
@@ -117,6 +136,8 @@ def from_webhook_payload(payload: InboundEmailPayload) -> InboundEmail:
         body=payload.body_plain,
         message_id=payload.message_id,
         source=payload.source,
+        in_reply_to=payload.in_reply_to,
+        references=payload.references,
     )
 
 
@@ -150,6 +171,13 @@ def is_auto_generated(msg: EmailMessage) -> bool:
     return auto_generated_reason(msg) is not None
 
 
+def sender_authentication_failed(results_header: str) -> bool:
+    """``Authentication-Results`` as stamped by the receiving server. Only failures count, so a sender
+    adding a forged "pass" header gains nothing."""
+    text = results_header.lower()
+    return "dmarc=fail" in text or ("spf=fail" in text and "dkim=fail" in text)
+
+
 def parse_rfc822(raw: bytes) -> tuple[EmailMessage, InboundEmail]:
     msg = message_from_bytes(raw, policy=policy.default)
     if not isinstance(msg, EmailMessage):  # pragma: no cover - policy.default always yields EmailMessage
@@ -167,5 +195,9 @@ def parse_rfc822(raw: bytes) -> tuple[EmailMessage, InboundEmail]:
         body=body,
         message_id=str(msg.get("Message-ID", "")) or None,
         source="imap",
+        in_reply_to=str(msg.get("In-Reply-To", "")) or None,
+        references=str(msg.get("References", "")) or None,
     )
+    if sender_authentication_failed(str(msg.get("Authentication-Results", ""))):
+        email = email.model_copy(update={"sender_auth_failed": True})
     return msg, email

@@ -501,7 +501,7 @@ async def seed_database(
             return False
         if force:
             for table in (
-                "refunds", "card_freezes", "crm_notes", "email_outbox", "supervisor_alerts", "inbound_emails",
+                "refunds", "card_freezes", "crm_notes", "email_outbox", "supervisor_alerts", "inbound_emails", "case_queue",
                 "stripe_mirror", "stripe_charges",  # Stripe-side objects stay; only the local mapping resets
                 "ticket_events", "tickets", "transactions", "customers",
             ):

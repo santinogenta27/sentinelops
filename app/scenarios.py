@@ -117,3 +117,10 @@ DEMO_SCENARIOS: list[Scenario] = [
         "expectation": "Spanish ticket understood → in-window auto refund",
     },
 ]
+
+_TEMPLATE_MESSAGES = frozenset(s["message"] for s in (*SCENARIOS, *DEMO_SCENARIOS))
+
+
+def is_template_message(message: str) -> bool:
+    """A built-in test scenario, word for word (fixed text about fixed demo accounts)."""
+    return message in _TEMPLATE_MESSAGES

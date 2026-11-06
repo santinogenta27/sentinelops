@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -21,16 +20,27 @@ from langgraph.types import interrupt
 from pydantic import ValidationError
 
 from app.agent import heuristics, prompts
-from app.agent.autopilot import AUTOPILOT_REVIEWER
+from app.agent.autopilot import AUTOPILOT_LIMIT_USD, AUTOPILOT_REVIEWER
 from app.agent.engine import (
     MAX_LOOKBACK_DAYS,
     assess_risk,
     inflated_amount_requested,
     investigate,
+    partial_amount_requested,
     plan_resolution,
     requires_human_approval,
+    undisputed_refunds,
+    unverified_policies,
 )
-from app.agent.guardrails import detect_prompt_injection, fence_untrusted, find_emails, find_money_amounts
+from app.agent.guardrails import (
+    detect_prompt_injection,
+    fence_untrusted,
+    find_emails,
+    find_money_amounts,
+    literal_numbers,
+    only_foreign_amounts,
+)
+from app.agent.temporal import extract_date_hint, hint_for_day
 from app.config import Settings
 from app.db.database import utcnow
 from app.db.repository import Repository
@@ -57,6 +67,7 @@ from app.models.schemas import (
     TransactionQuery,
     TransactionRecord,
     TriageExtraction,
+    TriageSignals,
 )
 from app.models.state import AgentState
 from app.rag.retriever import PolicyRetriever
@@ -64,8 +75,8 @@ from app.rag.retriever import PolicyRetriever
 logger = logging.getLogger("sentinelops.agent")
 
 DB_TOOL = "db.query_transactions"
+MAX_CLARIFICATION_ROUNDS = 3  # after this many unanswered questions a person takes over
 NodeResult = dict[str, Any]
-_NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
 @dataclass(slots=True)
@@ -122,6 +133,11 @@ class SentinelNodes:
             return False  # operator-verified alias of exactly this account
         return customer.email != sender
 
+    @classmethod
+    def _identity_unverified(cls, state: AgentState, customer: CustomerRecord | None) -> bool:
+        """Nothing shows the writer owns this account: treat them as a stranger (POL-ID-001)."""
+        return customer is not None and (cls._sender_mismatch(state, customer) or bool(state.get("identity_unverified")))
+
     @staticmethod
     def _transactions(state: AgentState) -> list[TransactionRecord]:
         return [TransactionRecord.model_validate(r) for r in state.get("db_records", [])]
@@ -136,6 +152,10 @@ class SentinelNodes:
         signals = detect_prompt_injection(raw)
         if signals:
             logs.append(_log(node, f"⚠ prompt-injection signatures detected: {signals} → message treated as hostile data"))
+        literal_text = raw.casefold()
+
+        def in_message(value: str | None) -> bool:
+            return bool(value) and str(value).casefold() in literal_text
 
         extraction: TriageExtraction | None = None
         llm = self._llm
@@ -161,17 +181,39 @@ class SentinelNodes:
             email = extraction.customer_email
         elif email is None and extraction.customer_email is not None:
             logs.append(_log(node, f"dropped hallucinated email {extraction.customer_email!r} (not in message)"))
-        literal_numbers = {round(float(n.replace(",", "")), 2) for n in _NUMBER_RE.findall(raw) if n.replace(",", "").replace(".", "", 1).isdigit()}
+        literal = literal_numbers(raw)
         amount = extraction.dispute_amount
-        if amount is not None and all(abs(amount - n) >= 0.005 for n in literal_numbers):
+        if amount is not None and all(abs(amount - n) >= 0.005 for n in literal):
             logs.append(_log(node, f"dropped hallucinated amount {amount} (not in message)"))
             amount = None
         refs = [r for r in extraction.transaction_refs if r.lower() in raw.lower()]
+        if extraction.manipulation_suspected and "llm_flagged_manipulation" not in signals:
+            logs.append(_log(node, "⚠ the model flagged a manipulation attempt → message treated as hostile data"))
+            signals = [*signals, "llm_flagged_manipulation"]
+
+        # Regex intents always count; a model-only refund intent must quote the customer's own words.
+        triage_signals = TriageSignals(
+            charge_date=extraction.charge_date if in_message(extraction.charge_date_text) else None,
+            card_last4=extraction.card_last4 if in_message(extraction.card_last4) else None,
+            product_hint=extraction.product_hint if in_message(extraction.product_hint) else None,
+            refund_requested=heuristics.requests_refund(raw) or in_message(extraction.refund_request_quote),
+            partial_requested=heuristics.requests_partial_refund(raw) or extraction.wants_partial_refund,
+            cancellation_requested=heuristics.requests_cancellation(raw) or extraction.wants_cancellation,
+            currency_unconfirmed=only_foreign_amounts(raw) or (extraction.currency != "USD" and amount is not None),
+        )
+        language = extraction.language or heuristics.detect_language(raw)
 
         logs.append(
-            _log(node, f"category={extraction.claim_category} email={email} amount={amount} refs={refs}")
+            _log(
+                node,
+                f"category={extraction.claim_category} email={email} amount={amount} refs={refs} language={language} "
+                f"signals={triage_signals.model_dump(mode='json', exclude_defaults=True)}",
+            )
         )
         return {
+            "triage_signals": triage_signals.model_dump(mode="json"),
+            "customer_language": language,
+            "complaint_summary": extraction.summary,
             "customer_email": email,
             "dispute_amount": amount,
             "claim_category": extraction.claim_category,
@@ -292,13 +334,25 @@ class SentinelNodes:
         node = "policy_retriever"
         started = time.perf_counter()
         category = state.get("claim_category") or "GENERAL"
-        query = f"{category.replace('_', ' ').lower()} {state.get('investigation_summary', '')}"[:1000]
+        signals = TriageSignals.model_validate(state.get("triage_signals") or {})
+        # The handbook is in English: what triage understood keeps retrieval working for any language.
+        terms = [category.replace("_", " ").lower()]
+        if signals.refund_requested:
+            terms.append("refund window eligible charge")
+        if signals.partial_requested or signals.cancellation_requested:
+            terms.append("cancellation partial refund human review")
+        query = f"{' '.join(terms)} {state.get('investigation_summary', '')}"[:1000]
         hits = self.d.retriever.search(query, k=4, category_hint=category)
         clauses = [h.render() for h in hits]
+        required: list[str] = []
         if state.get("injection_signals"):
-            sec = self.d.retriever.get("POL-SEC-001")
-            if sec and all(not c.startswith("[POL-SEC-001]") for c in clauses):
-                clauses.append(f"[{sec.clause_id}] {sec.title}: {sec.text}")
+            required.append("POL-SEC-001")
+        if signals.partial_requested or signals.cancellation_requested:
+            required.append("POL-ESC-002")
+        for clause_id in required:
+            clause = self.d.retriever.get(clause_id)
+            if clause and all(not c.startswith(f"[{clause_id}]") for c in clauses):
+                clauses.append(f"[{clause.clause_id}] {clause.title}: {clause.text}")
         return {
             "policy_clauses": clauses,
             "execution_status": "PLANNING",
@@ -322,7 +376,8 @@ class SentinelNodes:
         tool_failure = state.get("last_tool_error") is not None
         raw = state["raw_message"]
         claimed = [a for a in find_money_amounts(raw) if a <= 1_000_000]
-        refund_requested = heuristics.requests_refund(raw)
+        triage = TriageSignals.model_validate(state.get("triage_signals") or {})
+        refund_requested = triage.refund_requested
         signals = list(state.get("injection_signals", []))
         if refund_requested and inflated_amount_requested(txns, claimed) and "unsupported_amount" not in signals:
             # Ledger-aware check (POL-SEC-001): asking for more than the cited charge is manipulation.
@@ -337,6 +392,12 @@ class SentinelNodes:
             dispute_amount=state.get("dispute_amount"),
             claimed_amounts=claimed,
             now=now,
+            date_hint=extract_date_hint(raw, now) or (hint_for_day(triage.charge_date) if triage.charge_date else None),
+            card_last4=triage.card_last4,
+            product=triage.product_hint or raw,
+        )
+        partial_requested = refund_requested and (
+            triage.partial_requested or partial_amount_requested(inv.targets, inv.transactions, claimed)
         )
         plan = plan_resolution(
             inv=inv,
@@ -345,6 +406,9 @@ class SentinelNodes:
             tool_failure=tool_failure,
             injection_detected=injection,
             refund_requested=refund_requested,
+            partial_requested=partial_requested,
+            cancellation_requested=triage.cancellation_requested,
+            currency_unconfirmed=triage.currency_unconfirmed and not referenced,
         )
         if plan.action is None:
             new_args = {**args, "lookback_days": plan.requery_lookback_days or MAX_LOOKBACK_DAYS}
@@ -354,16 +418,30 @@ class SentinelNodes:
                 "logs": [
                     _log(
                         node,
-                        f"referenced charges {inv.missing_references} not in {lookback}-day window → "
+                        f"cited charge not found in the {lookback}-day window ({inv.missing_references or 'by amount/date'}) → "
                         f"re-querying DBInspector with lookback={new_args['lookback_days']}d",
                     )
                 ],
             }
 
         action = plan.action
+        unknown_policies = unverified_policies(action, self.d.retriever.by_id)
+        if unknown_policies:
+            # Nothing is decided on a clause the handbook does not contain.
+            action = ResolutionAction(
+                action_type="ESCALATE",
+                reason_code="POLICY_UNVERIFIED",
+                policy_refs=[],
+                secondary_actions=["CRM_NOTE"],
+                customer_facing_reason="We need a specialist to review your request in more detail.",
+            )
         sender_mismatch = self._sender_mismatch(state, customer)
-        if sender_mismatch and "POL-ID-001" not in action.policy_refs:
+        identity_unverified = self._identity_unverified(state, customer)
+        if identity_unverified and "POL-ID-001" not in action.policy_refs:
             action = action.model_copy(update={"policy_refs": [*action.policy_refs, "POL-ID-001"]})
+        undisputed = undisputed_refunds(inv=inv, action=action, category=category, refund_requested=refund_requested)
+        if undisputed and "POL-HITL-001" not in action.policy_refs:
+            action = action.model_copy(update={"policy_refs": [*action.policy_refs, "POL-HITL-001"]})
         risk = assess_risk(
             customer=customer,
             findings=inv.findings,
@@ -373,9 +451,11 @@ class SentinelNodes:
             hitl_threshold=s.hitl_threshold_usd,
             now=now,
             sender_mismatch=sender_mismatch,
+            identity_unverified=identity_unverified and not sender_mismatch,
+            undisputed_refund=bool(undisputed),
         )
         needs_human = requires_human_approval(
-            action, risk, injection_detected=injection, hitl_threshold=s.hitl_threshold_usd
+            action, risk, injection_detected=injection, hitl_threshold=s.hitl_threshold_usd, undisputed_refund=bool(undisputed)
         )
         clauses = list(state.get("policy_clauses", []))
         for pid in action.policy_refs:
@@ -507,6 +587,11 @@ class SentinelNodes:
             logs.append(_log(node, "⛔ execution blocked — amount above autonomous authority"))
             return {"execution_receipt": receipt.model_dump(mode="json"), "execution_status": "DRAFTING", "logs": logs}
 
+        if state.get("reviewer") == AUTOPILOT_REVIEWER and action.total_amount > AUTOPILOT_LIMIT_USD:
+            receipt = ExecutionReceipt(executed=False, note="BLOCKED: amount above the auto-pilot limit")
+            logs.append(_log(node, "⛔ execution blocked — amount above the auto-pilot limit"))
+            return {"execution_receipt": receipt.model_dump(mode="json"), "execution_status": "DRAFTING", "logs": logs}
+
         receipts: list[RefundReceipt] = []
         failures: list[str] = []
         approver = state.get("reviewer") or "sentinelops-autopilot"
@@ -634,6 +719,7 @@ class SentinelNodes:
         action = ResolutionAction.model_validate(state["resolution_action"])
         receipt = ExecutionReceipt.model_validate(state["execution_receipt"]) if state.get("execution_receipt") else None
         customer = self._customer(state)
+        unverified = self._identity_unverified(state, customer)
         executed: list[dict[str, Any]] = [
             {"transaction_id": r.transaction_id, "amount": r.amount, "currency": r.currency}
             for r in (receipt.refunds if receipt else [])
@@ -641,15 +727,32 @@ class SentinelNodes:
         return {
             "ticket_reference": state["ticket_id"],
             # Never reveal the account holder's name to an unverified sender (POL-ID-001).
-            "customer_name": customer.name if customer and not self._sender_mismatch(state, customer) else None,
+            "customer_name": customer.name if customer and not unverified else None,
             "outcome": action.action_type,
             "human_rejected": state.get("human_approved") is False,
             "execution_failed": bool(receipt and not receipt.executed and action.action_type == "REFUND"),
             "executed_refunds": executed,
             "total_refunded": round(sum(float(e["amount"]) for e in executed), 2),
             "customer_facing_reason": action.customer_facing_reason,
-            "customer_transaction_ids": [t.id for t in self._transactions(state)],
+            # An unverified writer learns nothing about the account beyond what was actually executed.
+            "customer_transaction_ids": [str(e["transaction_id"]) for e in executed]
+            if unverified
+            else [t.id for t in self._transactions(state)],
+            "reason_code": action.reason_code,
+            "language": state.get("customer_language") or "en",
+            "customer_request": state.get("complaint_summary", ""),
+            # The charges this case is about, as the ledger has them. Never shown to an unverified writer.
+            "verified_charges": [] if unverified else self._verified_charges(state),
         }
+
+    def _verified_charges(self, state: AgentState) -> list[dict[str, Any]]:
+        cited = {tid for f in state.get("findings", []) for tid in f.get("transaction_ids", [])}
+        return [
+            {"transaction_id": t.id, "amount": t.amount, "currency": t.currency, "date": t.created_at.date().isoformat(),
+             "description": t.merchant_descriptor.split("*")[-1], "status": t.status}
+            for t in self._transactions(state)
+            if t.id in cited
+        ]
 
     def _template(self, state: AgentState) -> CustomerDraft:
         f = self._facts(state)
@@ -661,6 +764,8 @@ class SentinelNodes:
             customer_facing_reason=f["customer_facing_reason"],
             human_rejected=f["human_rejected"],
             execution_failed=f["execution_failed"],
+            language=f["language"],
+            reason_code=f["reason_code"],
         )
 
     async def response_drafter(self, state: AgentState) -> NodeResult:
@@ -700,7 +805,8 @@ class SentinelNodes:
     def _grounding_sets(self, state: AgentState) -> tuple[set[float], set[str], set[float]]:
         f = self._facts(state)
         executed_amounts = {round(e["amount"], 2) for e in f["executed_refunds"]}
-        allowed = executed_amounts | ({f["total_refunded"]} if executed_amounts else set())
+        billed = {round(float(c["amount"]), 2) for c in f["verified_charges"]}
+        allowed = executed_amounts | billed | ({f["total_refunded"]} if executed_amounts else set())
         required = {f["total_refunded"]} if executed_amounts else set()
         return allowed, set(f["customer_transaction_ids"]), required
 
@@ -709,8 +815,10 @@ class SentinelNodes:
         s = self.d.settings
         draft = state.get("customer_response_draft", "")
         allowed, ids, required = self._grounding_sets(state)
+        refund_executed = bool(required)
         det = heuristics.heuristic_judge(
-            draft, allowed_amounts=allowed, allowed_transaction_ids=ids, required_amounts=required, threshold=s.judge_pass_threshold
+            draft, allowed_amounts=allowed, allowed_transaction_ids=ids, required_amounts=required,
+            threshold=s.judge_pass_threshold, refund_executed=refund_executed,
         )
         verdict = det
         source = "deterministic grounding audit"
@@ -744,7 +852,7 @@ class SentinelNodes:
                 safe_text = f"Subject: {safe.subject}\n\n{safe.body}"
                 safe_verdict = heuristics.heuristic_judge(
                     safe_text, allowed_amounts=allowed, allowed_transaction_ids=ids, required_amounts=required,
-                    threshold=s.judge_pass_threshold,
+                    threshold=s.judge_pass_threshold, refund_executed=refund_executed,
                 )
                 update["customer_response_draft"] = safe_text
                 update["judge_verdict"] = safe_verdict.model_copy(
@@ -796,7 +904,7 @@ class SentinelNodes:
                 inbound_source=state.get("inbound_source"),
                 in_reply_to=state.get("email_message_id"),
                 # Real SMTP only to an identity we know: the account owner or an operator-verified alias.
-                verified_recipient=customer is not None and not self._sender_mismatch(state, customer),
+                verified_recipient=customer is not None and not self._identity_unverified(state, customer),
             )
             await self.d.crm.add_note(
                 customer_id=customer.id if customer else None,
@@ -812,4 +920,37 @@ class SentinelNodes:
             "smtp_failed": "SMTP delivery failed — kept in outbox for retry",
         }.get(delivery, delivery)
         logs.append(_log(node, f"email to {to_addr} {how} → status {final}"))
+        queued = await self._queue_for_people(state, action, final)
+        if queued:
+            logs.append(_log(node, f"case queued: {queued}"))
         return {"email_dispatched": True, "execution_status": final, "logs": logs}
+
+    async def _queue_for_people(self, state: AgentState, action: ResolutionAction, final: str) -> str | None:
+        """Whatever the reply promised a person would do reaches a person (POL-ESC-001/002)."""
+        triage = TriageSignals.model_validate(state.get("triage_signals") or {})
+        round_ = state.get("clarification_round", 0)
+        kind, reason = "ESCALATION", action.reason_code
+        if final == "REJECTED":
+            reason = "HUMAN_REJECTED"
+        elif final == "FAILED":
+            reason = "EXECUTION_FAILED"
+        elif action.action_type == "REQUEST_INFO":
+            if round_ + 1 >= MAX_CLARIFICATION_ROUNDS:
+                reason = "CLARIFICATION_LIMIT"
+            else:
+                kind = "AWAITING_CUSTOMER"
+        elif action.action_type != "ESCALATE":
+            if not triage.cancellation_requested or final != "EXECUTED":
+                return None
+            reason = "CANCELLATION_REVIEW"  # the refund is done; the cancellation is still a person's call
+        await self.d.repo.db.enqueue_case(
+            ticket_id=state["ticket_id"],
+            kind=kind,
+            reason_code=reason,
+            category=state.get("claim_category"),
+            customer_email=state.get("customer_email"),
+            sender_email=state.get("sender_email"),
+            summary=str(state.get("complaint_summary") or state.get("investigation_summary", ""))[:600],
+            clarification_round=round_,
+        )
+        return f"{kind}/{reason}"

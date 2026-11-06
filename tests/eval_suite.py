@@ -177,9 +177,12 @@ async def _run_case(rt: SentinelRuntime, faults: FaultInjector, case: dict[str, 
     draft = str(values.get("customer_response_draft", ""))
     txn_ids = {str(r["id"]) for r in values.get("db_records", [])}
     executed = {round(float(cast(float, r["amount"])), 2) for r in refunds}
-    allowed = executed | ({payout} if executed else set())
+    cited = {tid for f in values.get("findings", []) for tid in f.get("transaction_ids", [])}
+    billed = {round(float(r["amount"]), 2) for r in values.get("db_records", []) if r["id"] in cited}
+    allowed = executed | billed | ({payout} if executed else set())
     report = grounding_check(
-        draft, allowed_amounts=allowed, allowed_transaction_ids=txn_ids, required_amounts={payout} if executed else set()
+        draft, allowed_amounts=allowed, allowed_transaction_ids=txn_ids, required_amounts={payout} if executed else set(),
+        refund_executed=bool(executed),
     )
     verdict = values.get("judge_verdict") or {}
     hallucinated = report.critical or bool(report.issues) or not verdict.get("passed", False) or not draft

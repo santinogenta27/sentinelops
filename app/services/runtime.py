@@ -32,11 +32,12 @@ from app.integrations.stripe_live import StripeBackend, StripeLive
 from app.integrations.stripe_mock import StripeMock
 from app.llm.base import LLMClient
 from app.llm.factory import build_llm
-from app.models.schemas import TERMINAL_STATUSES, ChannelMeta, HumanDecision, TicketView
+from app.models.schemas import TERMINAL_STATUSES, ChannelMeta, HumanDecision, TicketCreate, TicketView
 from app.models.state import AgentState, initial_state
 from app.observability import configure_tracing
 from app.rag.embeddings import Embedder, GeminiEmbedder, HashingEmbedder
 from app.rag.retriever import PolicyRetriever, load_policies
+from app.scenarios import is_template_message
 from app.services.controls import RuntimeControls
 
 logger = logging.getLogger("sentinelops.runtime")
@@ -280,8 +281,34 @@ class SentinelRuntime:
         if snap.next:
             await self._publish_outcome(ticket_id, values, status, "paused", {"next": list(snap.next), "status": status})
         else:
+            await self._notify_queue(ticket_id, values)
             await self._publish_outcome(ticket_id, values, status, "run_completed", {"status": status})
         return values
+
+    async def _notify_queue(self, ticket_id: str, values: dict[str, Any]) -> None:
+        """A newly queued case reaches the supervisor; nothing here can affect the finished run."""
+        case = await self.db.get_case(ticket_id)
+        if case is None or case["status"] != "OPEN":
+            return
+        await self.emit(ticket_id, "case_queued", None, {"kind": case["kind"], "reason_code": case["reason_code"]})
+        if case["kind"] != "ESCALATION":
+            return
+        try:
+            await self.deps.mailer.send_supervisor_alert(
+                ticket_id=ticket_id,
+                amount=0.0,
+                currency="USD",
+                action_type=str(case["reason_code"]),
+                risk_level=str((values.get("risk") or {}).get("level", "UNKNOWN")),
+                risk_flags=[str(f) for f in (values.get("risk") or {}).get("flags", [])],
+                channel=str(values.get("channel") or "web"),
+                sender=values.get("sender_email"),
+                subject=values.get("email_subject"),
+                summary=str(values.get("investigation_summary", "")),
+                review_only=True,
+            )
+        except Exception:  # noqa: BLE001 - alerting must never break the run
+            logger.exception("escalation alert failed for %s", ticket_id)
 
     async def _alert_supervisor(self, ticket_id: str, values: dict[str, Any]) -> None:
         """HITL notification: persist/email the alert and push a high-priority SSE event to the cockpit."""
@@ -349,10 +376,30 @@ class SentinelRuntime:
             email_subject=m.subject,
             email_message_id=m.message_id,
             sender_alias_of=m.sender_alias_of,
+            identity_unverified=m.identity_unverified,
+            parent_ticket_id=m.parent_ticket_id,
+            clarification_round=m.clarification_round,
         )
         async with self._lock(tid):
             values = await self._drive(tid, state)
         return tid, values
+
+    async def web_intake(self, ticket: TicketCreate) -> tuple[str | None, ChannelMeta]:
+        """Who is behind a ticket typed or pasted into the cockpit/API?
+
+        A pasted email carries its From address, checked exactly like the email channel. Otherwise the
+        operator may assert the account; if nobody did, an address in the text proves nothing (POL-ID-001).
+        The built-in test scenarios are the one exception: fixed text about fixed demo accounts.
+        """
+        if ticket.sender_email:
+            repo = self.deps.repo
+            owner = await repo.get_customer_by_email(ticket.sender_email)
+            alias = None if owner else await repo.get_customer_by_alias(ticket.sender_email)
+            account = owner or alias
+            meta = ChannelMeta(sender_email=ticket.sender_email, sender_alias_of=alias.email if alias else None)
+            return (account.email if account else ticket.customer_email), meta
+        unverified = ticket.customer_email is None and not is_template_message(ticket.message)
+        return ticket.customer_email, ChannelMeta(identity_unverified=unverified)
 
     def submit(
         self,

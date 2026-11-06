@@ -7,7 +7,9 @@ authorise. Anything risky keeps waiting for a human supervisor:
 * prompt-injection / manipulation signals          → human
 * sender is not the account owner (POL-ID-001)      → human
 * risk level HIGH (fraud claims, chargeback abuse…) → human
-* payout above ``AUTOPILOT_MAX_USD``                 → human
+* identity not verified (POL-ID-001)                → human
+* a refund the customer never asked for             → human
+* payout above ``AUTOPILOT_MAX_USD``, itself capped at ``AUTOPILOT_LIMIT_USD`` → human
 * anything that is not a plain REFUND              → human
 """
 
@@ -18,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 AUTOPILOT_REVIEWER = "auto-pilot"
+AUTOPILOT_LIMIT_USD = 200.0  # POL-HITL-001: above this a human decides, whatever is configured
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +31,7 @@ class AutopilotVerdict:
 
 
 def autopilot_verdict(values: Mapping[str, Any], *, enabled: bool, max_usd: float) -> AutopilotVerdict:
+    ceiling = min(max_usd, AUTOPILOT_LIMIT_USD)
     action = values.get("resolution_action") or {}
     risk = values.get("risk") or {}
     amount = round(sum(float(r.get("amount", 0)) for r in action.get("refunds") or []), 2)
@@ -39,10 +43,14 @@ def autopilot_verdict(values: Mapping[str, Any], *, enabled: bool, max_usd: floa
     flags = [str(f) for f in risk.get("flags", [])]
     if "sender_not_account_owner" in flags:
         reasons.append("sender is not the account owner (POL-ID-001)")
+    if "identity_unverified" in flags:
+        reasons.append("customer identity is not verified (POL-ID-001)")
+    if "refund_not_requested" in flags:
+        reasons.append("the customer did not ask for this refund (POL-HITL-001)")
     if risk.get("level") == "HIGH":
         reasons.append(f"risk level HIGH ({', '.join(flags) or 'no flags'})")
     if action.get("action_type") != "REFUND":
         reasons.append(f"action {action.get('action_type')} is not a plain refund")
-    if amount > max_usd:
-        reasons.append(f"payout ${amount:,.2f} exceeds the auto-pilot ceiling ${max_usd:,.2f}")
+    if amount > ceiling:
+        reasons.append(f"payout ${amount:,.2f} exceeds the auto-pilot ceiling ${ceiling:,.2f}")
     return AutopilotVerdict(eligible=not reasons, reasons=reasons, amount=amount)

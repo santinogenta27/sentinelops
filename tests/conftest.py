@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +20,17 @@ os.environ["ENABLE_EMAIL_LISTENER"] = "false"
 os.environ["ENABLE_EMAIL_SENDER"] = "false"
 
 from app.config import Settings  # noqa: E402
-from app.integrations.faults import FaultInjector  # noqa: E402
+from app.integrations.faults import FaultInjector, fault_injector  # noqa: E402
 from app.llm.base import LLMClient, LLMError, LLMTask, T  # noqa: E402
 from app.services.runtime import SentinelRuntime  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _clean_global_faults() -> Iterator[None]:
+    """API tests share one process-wide fault injector: faults armed by one test must not leak into the next."""
+    fault_injector.clear()
+    yield
+    fault_injector.clear()
 
 
 def make_settings(tmp_path: Path, **overrides: Any) -> Settings:

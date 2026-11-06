@@ -91,8 +91,15 @@ class Settings(BaseSettings):
     # --- Auto-Pilot (zero-touch) -------------------------------------------
     # When ON, the HumanGate approves payouts that comply with policy (no injection, sender owns the
     # account, risk not HIGH) up to ``autopilot_max_usd``. Everything else still waits for a human.
+    # Capped at AUTOPILOT_LIMIT_USD ($200, POL-HITL-001). With HITL_THRESHOLD_USD also at 200 Auto-Pilot has
+    # nothing left to approve: it only acts on policy-compliant payouts between the two.
     autopilot_default: bool = True  # initial value; the cockpit toggle persists the live value in the DB
-    autopilot_max_usd: float = Field(default=1000.0, ge=0, le=100_000)
+    autopilot_max_usd: float = Field(default=200.0, ge=0, le=100_000)
+
+    # --- Operator access -----------------------------------------------------
+    # "name:token,name2:token2". When set, operator actions (HITL decisions, ticket intake, settings) need
+    # a token, and the reviewer recorded in the audit trail is the token's owner, not a name in the request.
+    reviewer_tokens: SecretStr | None = None
 
     # --- Stripe (live dashboard + test-mode mirror of ledger refunds) -------
     stripe_api_key: SecretStr | None = None  # sk_test_... (writes are refused for live keys)
@@ -125,6 +132,13 @@ class Settings(BaseSettings):
         self.smtp_user = None
         self.smtp_password = None
         return self
+
+    @property
+    def reviewer_token_map(self) -> dict[str, str]:
+        """token -> reviewer name."""
+        raw = self.reviewer_tokens.get_secret_value() if self.reviewer_tokens else ""
+        pairs = (entry.split(":", 1) for entry in raw.split(",") if ":" in entry)
+        return {token.strip(): name.strip() for name, token in pairs if name.strip() and token.strip()}
 
     @property
     def subject_keywords(self) -> list[str]:

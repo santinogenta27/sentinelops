@@ -134,7 +134,8 @@
     <div class="panel p-4">
       <div class="flex items-center gap-2 mb-3"><i data-lucide="inbox" class="w-4 h-4 text-indigo-300"></i><h2 class="font-semibold text-sm">New dispute ticket</h2></div>
       <form id="ticket-form" class="flex flex-col gap-2">
-        <textarea id="f-msg" rows="5" required minlength="10" maxlength="6000" placeholder="Paste the customer complaint…" class="p-2.5 text-sm scroll"></textarea>
+        <textarea id="f-msg" rows="5" required minlength="10" maxlength="6000" placeholder="Paste any customer billing email…" class="p-2.5 text-sm scroll"></textarea>
+        <input id="f-sender" type="email" placeholder="From: sender of the pasted email (recommended)" class="px-2.5 py-2 text-sm" />
         <input id="f-email" type="email" placeholder="Authenticated customer email (optional)" class="px-2.5 py-2 text-sm" />
         <button class="mt-1 inline-flex justify-center items-center gap-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg py-2 text-sm font-semibold"><i data-lucide="play" class="w-4 h-4"></i>Run agent</button>
       </form>
@@ -184,6 +185,7 @@
         <button class="tab active px-3 py-2 border-b-2 border-transparent muted" data-tab="detail">Ticket</button>
         <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="timeline">Timeline</button>
         <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="tools">Tool calls</button>
+        <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="queue">Review queue <span id="queue-count" class="text-xs">0</span></button>
         <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="ledger">Ledger / Outbox</button>
         <button class="tab px-3 py-2 border-b-2 border-transparent muted whitespace-nowrap" data-tab="stripe">💳 Stripe Live Dashboard</button>
         <button class="tab px-3 py-2 border-b-2 border-transparent muted" data-tab="evals">Evals</button>
@@ -191,6 +193,7 @@
       <div id="tab-detail" class="tabpane"><div class="muted text-sm py-10 text-center">Select or run a ticket to inspect the agent's state.</div></div>
       <div id="tab-timeline" class="tabpane hidden"><div id="timeline" class="mono text-[11.5px] leading-5 max-h-[720px] overflow-auto scroll"></div></div>
       <div id="tab-tools" class="tabpane hidden"></div>
+      <div id="tab-queue" class="tabpane hidden"></div>
       <div id="tab-ledger" class="tabpane hidden"></div>
       <div id="tab-stripe" class="tabpane hidden"></div>
       <div id="tab-evals" class="tabpane hidden"></div>
@@ -357,8 +360,21 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const money = (n) => n == null ? "—" : "$" + Number(n).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
 const icons = () => window.lucide && lucide.createIcons();
-async function api(path, opts = {}) {
-  const res = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts});
+function operatorToken() {
+  try { return localStorage.getItem("sentinelops.operator_token") || ""; } catch { return ""; }
+}
+function rememberOperatorToken(token) {
+  try { localStorage.setItem("sentinelops.operator_token", token); } catch { /* storage blocked: ask again next time */ }
+}
+async function api(path, opts = {}, retried = false) {
+  const headers = {"Content-Type": "application/json"};
+  const token = operatorToken();
+  if (token) headers["X-Operator-Token"] = token;
+  const res = await fetch(path, {headers, ...opts});
+  if (res.status === 401 && !retried) {
+    const entered = window.prompt("Operator token required for this action:");
+    if (entered) { rememberOperatorToken(entered.trim()); return api(path, opts, true); }
+  }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.detail ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : res.statusText);
   return body;
@@ -504,15 +520,50 @@ async function loadScenarios() {
   });
 }
 
-async function submitTicket(message, email) {
+async function loadQueue() {
+  const cases = await api("/api/queue").catch(() => []);
+  $("#queue-count").textContent = cases.length;
+  if (activeTab !== "queue") return;
+  const label = {ESCALATION: "Needs a person", AWAITING_CUSTOMER: "Waiting for the customer"};
+  $("#tab-queue").innerHTML = cases.length ? cases.map(c => `
+    <div class="panel2 p-3 mb-2">
+      <div class="flex items-center gap-2 text-xs"><b>${esc(label[c.kind] || c.kind)}</b><span class="muted mono">${esc(c.reason_code)}</span><span class="ml-auto muted mono">${esc(c.ticket_id)}</span></div>
+      <div class="text-sm my-1.5">${esc(c.summary || "(no summary)")}</div>
+      <div class="flex items-center gap-2 text-xs"><span class="muted">${esc(c.sender_email || c.customer_email || "unknown customer")}</span>
+        <button class="q-open ml-auto underline" data-id="${esc(c.ticket_id)}">Open</button>
+        ${c.kind === "AWAITING_CUSTOMER" && c.sender_email && c.last_message_id ? `<button class="q-reply underline" data-id="${esc(c.ticket_id)}">Simulate reply</button>` : ""}
+        <button class="q-resolve underline" data-id="${esc(c.ticket_id)}">Resolve</button></div>
+    </div>`).join("") : `<div class="muted text-sm py-6 text-center">No open cases.</div>`;
+  const find = (el) => cases.find(c => c.ticket_id === el.dataset.id);
+  $$(".q-open").forEach(b => b.onclick = () => { showTab("detail"); selectTicket(b.dataset.id); });
+  $$(".q-resolve").forEach(b => b.onclick = async () => {
+    const note = window.prompt("What was done? (kept in the audit trail)");
+    if (!note) return;
+    const reviewer = window.prompt("Your name:", "supervisor");
+    if (!reviewer) return;
+    try { await api(`/api/queue/${b.dataset.id}/resolve`, {method: "POST", body: JSON.stringify({reviewer, note})}); loadQueue(); }
+    catch (e) { toast(e.message, "bad"); }
+  });
+  $$(".q-reply").forEach(b => b.onclick = async () => {
+    const c = find(b);
+    const body = window.prompt("Customer's reply:");
+    if (!body) return;
+    try {
+      await api("/api/email/simulate", {method: "POST", body: JSON.stringify({from: c.sender_email, subject: `Re: ${c.subject || "billing"}`, body_plain: body, in_reply_to: c.last_message_id})});
+      setTimeout(loadQueue, 800);
+    } catch (e) { toast(e.message, "bad"); }
+  });
+}
+
+async function submitTicket(message, email, sender) {
   try {
-    const r = await api("/api/tickets", {method: "POST", body: JSON.stringify({message, customer_email: email || null})});
+    const r = await api("/api/tickets", {method: "POST", body: JSON.stringify({message, customer_email: email || null, sender_email: sender || null})});
     toast(`Ticket ${r.ticket_id} submitted`, "info");
     await selectTicket(r.ticket_id);
     loadTickets();
   } catch (e) { toast("Submit failed: " + e.message, "bad"); }
 }
-$("#ticket-form").onsubmit = (ev) => { ev.preventDefault(); submitTicket($("#f-msg").value.trim(), $("#f-email").value.trim()); };
+$("#ticket-form").onsubmit = (ev) => { ev.preventDefault(); submitTicket($("#f-msg").value.trim(), $("#f-email").value.trim(), $("#f-sender").value.trim()); };
 
 const ticketChannels = {};
 async function loadTickets() {
@@ -739,6 +790,7 @@ function showTab(name) {
   activeTab = name;
   $$(".tab").forEach(x => x.classList.toggle("active", x.dataset.tab === name));
   $$(".tabpane").forEach(p => p.classList.toggle("hidden", p.id !== `tab-${name}`));
+  if (name === "queue") loadQueue();
   if (name === "ledger") loadLedger();
   if (name === "evals") loadEvals();
   if (name === "stripe") loadStripe();
@@ -892,7 +944,7 @@ function desktopAlert(ev) {
 }
 
 // ---------------------------------------------------------------- auto-pilot
-let autopilot = {enabled: false, max_usd: 1000};
+let autopilot = {enabled: false, max_usd: 200};
 function renderAutopilot(ap) {
   if (ap) autopilot = ap;
   const on = !!autopilot.enabled;
@@ -1196,6 +1248,7 @@ function connectSSE() {
   const handle = (msg) => {
     const ev = JSON.parse(msg.data);
     if (ev.type === "autopilot_changed") { renderAutopilot(ev.payload); return; }
+    if (ev.type === "case_queued" || ev.type === "case_resolved") loadQueue();
     if (ev.type === "email_received") {
       ticketChannels[ev.ticket_id] = "email";
       toast(`📧 Email de ${ev.payload.from_name || ev.payload.from} — “${ev.payload.subject || "(sin asunto)"}”`, "info", 6000);
@@ -1234,13 +1287,13 @@ function connectSSE() {
     }
   };
   ["ticket_created", "email_received", "node_started", "node_completed", "interrupt", "paused", "supervisor_alert", "decision", "run_completed", "run_error",
-   "autopilot_approved", "autopilot_blocked", "autopilot_changed"]
+   "autopilot_approved", "autopilot_blocked", "autopilot_changed", "case_queued", "case_resolved"]
     .forEach(t => es.addEventListener(t, handle));
 }
 
 // ---------------------------------------------------------------- boot
 drawGraph(); icons();
-loadDemo(); loadHealth(); loadMailStatus(); loadScenarios(); loadTickets(); loadApprovals(); refreshOutboxCache(); connectSSE();
+loadDemo(); loadHealth(); loadMailStatus(); loadScenarios(); loadTickets(); loadApprovals(); loadQueue(); refreshOutboxCache(); connectSSE();
 setInterval(loadHealth, 30000);
 setInterval(loadMailStatus, 5000);
 </script>

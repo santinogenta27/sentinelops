@@ -82,7 +82,15 @@ class Mailer:
 
     @staticmethod
     def _build(
-        *, sender: str, to: str, subject: str, text: str, html_body: str, in_reply_to: str | None, ticket_id: str
+        *,
+        sender: str,
+        to: str,
+        subject: str,
+        text: str,
+        html_body: str,
+        in_reply_to: str | None,
+        ticket_id: str,
+        message_id: str | None = None,
     ) -> EmailMessage:
         msg = EmailMessage()
         msg["From"] = sender
@@ -91,7 +99,7 @@ class Mailer:
         # Loop protection: when the customer is the support mailbox itself (demo self-send) our reply
         # lands back in the watched inbox; these markers make the listener skip it (RFC 3834).
         domain = sender.rsplit("@", 1)[-1].rstrip(">") or "sentinelops.local"
-        msg["Message-ID"] = f"{OUTBOUND_MESSAGE_ID_PREFIX}{ticket_id.lower()}-{secrets.token_hex(4)}@{domain}>"
+        msg["Message-ID"] = message_id or f"{OUTBOUND_MESSAGE_ID_PREFIX}{ticket_id.lower()}-{secrets.token_hex(4)}@{domain}>"
         msg["Auto-Submitted"] = "auto-replied"
         msg[OUTBOUND_MARKER_HEADER] = ticket_id
         if in_reply_to:
@@ -119,11 +127,14 @@ class Mailer:
         html_body = render_customer_email(
             heading=heading, body=body, ticket_id=ticket_id, support_address=self.settings.support_email_address
         )
+        # Fixed before sending, so a customer's reply can be matched to this message (simulated or not).
+        domain = self._from_header().rsplit("@", 1)[-1].rstrip(">")
+        message_id = f"{OUTBOUND_MESSAGE_ID_PREFIX}{ticket_id.lower()}-{secrets.token_hex(4)}@{domain}>"
         async with self.db.connect() as conn:
             cur = await conn.execute(
                 "INSERT OR IGNORE INTO email_outbox (ticket_id, to_address, subject, body, body_html, delivery, channel, "
-                "in_reply_to, created_at) VALUES (?, ?, ?, ?, ?, 'outbox', ?, ?, ?)",
-                (ticket_id, to_address, subject, body, html_body, channel, in_reply_to, iso(utcnow())),
+                "in_reply_to, message_id, created_at) VALUES (?, ?, ?, ?, ?, 'outbox', ?, ?, ?, ?)",
+                (ticket_id, to_address, subject, body, html_body, channel, in_reply_to, message_id, iso(utcnow())),
             )
             await conn.commit()
             if (cur.rowcount or 0) == 0:
@@ -143,7 +154,7 @@ class Mailer:
             await self._deliver(
                 self._build(
                     sender=self._from_header(), to=to_address, subject=subject, text=body,
-                    html_body=html_body, in_reply_to=in_reply_to, ticket_id=ticket_id,
+                    html_body=html_body, in_reply_to=in_reply_to, ticket_id=ticket_id, message_id=message_id,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - delivery failure must not fail the ticket
@@ -169,13 +180,18 @@ class Mailer:
         subject: str | None,
         summary: str,
         cockpit_url: str = "http://127.0.0.1:8000/",
+        review_only: bool = False,
     ) -> bool:
         """Persist (and optionally email) the HITL alert. Returns False if already alerted for this ticket."""
-        alert_subject = f"⚠️ Approval required: {action_type} {amount:,.2f} {currency} · {ticket_id}"
+        alert_subject = (
+            f"🔎 Review needed: {action_type} · {ticket_id}"
+            if review_only
+            else f"⚠️ Approval required: {action_type} {amount:,.2f} {currency} · {ticket_id}"
+        )
         html_body = render_supervisor_alert(
             ticket_id=ticket_id, amount=amount, currency=currency, action_type=action_type, risk_level=risk_level,
             risk_flags=risk_flags, channel=channel, sender=sender, subject=subject, summary=summary,
-            cockpit_url=cockpit_url,
+            cockpit_url=cockpit_url, review_only=review_only,
         )
         recipient = self.settings.supervisor_email
         real = self.real_delivery_enabled and not recipient.endswith(".demo")
@@ -195,7 +211,7 @@ class Mailer:
                 await self._deliver(
                     self._build(
                         sender=self._from_header(), to=recipient, subject=alert_subject,
-                        text=f"Approval required for {ticket_id}: {action_type} {amount:,.2f} {currency}.\n\n{summary}",
+                        text=f"{alert_subject}\n\n{summary}",
                         html_body=html_body, in_reply_to=None, ticket_id=ticket_id,
                     )
                 )

@@ -119,6 +119,25 @@ CREATE TABLE IF NOT EXISTS supervisor_alerts (
     created_at TEXT NOT NULL
 );
 
+-- Cases waiting for a person: escalations for staff, clarification questions for the customer.
+CREATE TABLE IF NOT EXISTS case_queue (
+    ticket_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('ESCALATION','AWAITING_CUSTOMER')),
+    status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','RESOLVED','CONTINUED')),
+    reason_code TEXT NOT NULL,
+    category TEXT,
+    customer_email TEXT,
+    sender_email TEXT,
+    summary TEXT NOT NULL DEFAULT '',
+    clarification_round INTEGER NOT NULL DEFAULT 0,
+    continued_by TEXT,
+    resolved_by TEXT,
+    resolution_note TEXT,
+    created_at TEXT NOT NULL,
+    closed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_queue_status ON case_queue(status, created_at);
+
 -- Operator-editable runtime settings (Auto-Pilot, mailbox connection). JSON values.
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
@@ -166,6 +185,7 @@ COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "delivery": "TEXT NOT NULL DEFAULT 'outbox'",
         "channel": "TEXT NOT NULL DEFAULT 'web'",
         "in_reply_to": "TEXT",
+        "message_id": "TEXT",
     },
 }
 
@@ -315,6 +335,83 @@ class Database:
                 "INSERT INTO app_settings (key, value_json, updated_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
                 (key, json.dumps(value), iso(utcnow())),
+            )
+            await conn.commit()
+
+    # --- case queue -----------------------------------------------------------
+    async def enqueue_case(
+        self,
+        *,
+        ticket_id: str,
+        kind: str,
+        reason_code: str,
+        category: str | None,
+        customer_email: str | None,
+        sender_email: str | None,
+        summary: str,
+        clarification_round: int,
+    ) -> bool:
+        """Idempotent per ticket (a replayed graph step queues nothing twice). True when newly queued."""
+        async with self.connect() as conn:
+            cur = await conn.execute(
+                "INSERT OR IGNORE INTO case_queue (ticket_id, kind, reason_code, category, customer_email, sender_email, "
+                "summary, clarification_round, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (ticket_id, kind, reason_code, category, customer_email, sender_email, summary, clarification_round, iso(utcnow())),
+            )
+            await conn.commit()
+            return (cur.rowcount or 0) > 0
+
+    async def get_case(self, ticket_id: str) -> dict[str, object] | None:
+        async with self.connect() as conn:
+            cur = await conn.execute("SELECT * FROM case_queue WHERE ticket_id = ?", (ticket_id,))
+            row = await cur.fetchone()
+        return {k: row[k] for k in row.keys()} if row else None
+
+    async def list_cases(self, *, status: str | None = "OPEN", kind: str | None = None, limit: int = 200) -> list[dict[str, object]]:
+        async with self.connect() as conn:
+            cur = await conn.execute(
+                "SELECT q.*, o.message_id AS last_message_id, t.subject AS subject FROM case_queue q "
+                "LEFT JOIN email_outbox o ON o.ticket_id = q.ticket_id LEFT JOIN tickets t ON t.id = q.ticket_id "
+                "WHERE (? IS NULL OR q.status = ?) AND (? IS NULL OR q.kind = ?) ORDER BY q.created_at DESC LIMIT ?",
+                (status, status, kind, kind, limit),
+            )
+            rows = await cur.fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+    async def resolve_case(self, ticket_id: str, *, reviewer: str, note: str) -> bool:
+        async with self.connect() as conn:
+            cur = await conn.execute(
+                "UPDATE case_queue SET status = 'RESOLVED', resolved_by = ?, resolution_note = ?, closed_at = ? "
+                "WHERE ticket_id = ? AND status = 'OPEN'",
+                (reviewer, note, iso(utcnow()), ticket_id),
+            )
+            await conn.commit()
+            return (cur.rowcount or 0) > 0
+
+    async def find_clarification(self, sender: str, thread_ids: list[str]) -> dict[str, object] | None:
+        """The open question this email answers: same sender, and it cites our question or their first email."""
+        if not thread_ids:
+            return None
+        marks = ",".join("?" * len(thread_ids))
+        async with self.connect() as conn:
+            cur = await conn.execute(
+                "SELECT q.ticket_id, q.clarification_round, t.raw_message FROM case_queue q "
+                "JOIN inbound_emails i ON i.ticket_id = q.ticket_id "
+                "JOIN tickets t ON t.id = q.ticket_id "
+                "LEFT JOIN email_outbox o ON o.ticket_id = q.ticket_id "
+                f"WHERE q.kind = 'AWAITING_CUSTOMER' AND q.status = 'OPEN' AND i.from_address = ? "  # noqa: S608
+                f"AND (i.message_id IN ({marks}) OR o.message_id IN ({marks})) "
+                "ORDER BY q.created_at DESC LIMIT 1",
+                (sender, *thread_ids, *thread_ids),
+            )
+            row = await cur.fetchone()
+        return {k: row[k] for k in row.keys()} if row else None
+
+    async def mark_case_continued(self, ticket_id: str, *, continued_by: str) -> None:
+        async with self.connect() as conn:
+            await conn.execute(
+                "UPDATE case_queue SET status = 'CONTINUED', continued_by = ?, closed_at = ? WHERE ticket_id = ? AND status = 'OPEN'",
+                (continued_by, iso(utcnow()), ticket_id),
             )
             await conn.commit()
 

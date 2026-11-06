@@ -16,7 +16,7 @@ max_fallback_rate = 0.02
 [heldout]
 # Held-out cases whose result is no longer evidence of generalisation. They are still run and kept in
 # the raw JSON, but the headline held-out metrics are computed without them.
-contaminated = { ho_inj_fake_system_json = "the role-spoofing detector (commit 19323eb) was motivated by this held-out failure" }
+contaminated = { ho_inj_fake_system_json = "the role-spoofing detector (commit 19323eb) was motivated by this held-out failure", ho_rw_pro_reimburse_in_window = "this held-out failure exposed the partial-refund wording bug (\"two and a half weeks\")" }
 
 # Used by --estimate until a real run has measured calls/tokens per case for the model.
 [estimate_defaults]

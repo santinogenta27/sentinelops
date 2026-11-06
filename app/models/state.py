@@ -43,6 +43,9 @@ class AgentState(TypedDict):
     requery_requested: bool
     tool_calls: Annotated[List[Dict[str, Any]], operator.add]
     injection_signals: List[str]
+    triage_signals: Dict[str, Any]  # TriageSignals: dates, card, product, intents verified against the message
+    customer_language: str  # "en" | "es" | "other"
+    complaint_summary: str  # what the customer asked, from triage (investigation_summary becomes internal)
     reviewer: Optional[str]
     execution_receipt: Optional[Dict[str, Any]]
     draft_attempts: int
@@ -55,6 +58,9 @@ class AgentState(TypedDict):
     email_subject: Optional[str]
     email_message_id: Optional[str]
     sender_alias_of: Optional[str]  # account email this sender is a verified alias of (operator-linked)
+    identity_unverified: bool  # identity rests on the message text or a failed sender check (POL-ID-001)
+    parent_ticket_id: Optional[str]  # the case this email answers, when it is a clarification reply
+    clarification_round: int
 
     # --- Stripe live mirror (test mode) ------------------------------------
     stripe_mirror: List[Dict[str, Any]]
@@ -71,9 +77,16 @@ def initial_state(
     email_subject: Optional[str] = None,
     email_message_id: Optional[str] = None,
     sender_alias_of: Optional[str] = None,
+    identity_unverified: bool = False,
+    parent_ticket_id: Optional[str] = None,
+    clarification_round: int = 0,
 ) -> AgentState:
     return AgentState(
         sender_alias_of=sender_alias_of,
+        identity_unverified=identity_unverified,
+        parent_ticket_id=parent_ticket_id,
+        clarification_round=clarification_round,
+        complaint_summary="",
         stripe_mirror=[],
         channel=channel,
         inbound_source=inbound_source,
@@ -107,6 +120,8 @@ def initial_state(
         requery_requested=False,
         tool_calls=[],
         injection_signals=[],
+        triage_signals={},
+        customer_language="en",
         reviewer=None,
         execution_receipt=None,
         draft_attempts=0,

@@ -24,7 +24,7 @@ from app.db.seed import seed_database
 from app.demo import DemoGuardMiddleware
 from app.integrations.email_inbound import InboundEmailPayload, from_webhook_payload
 from app.integrations.imap_listener import EmailListener
-from app.models.schemas import DecisionRequest, HumanDecision, TicketCreate, TicketCreated, TicketView
+from app.models.schemas import CaseResolution, DecisionRequest, HumanDecision, TicketCreate, TicketCreated, TicketView
 from app.scenarios import DEMO_SCENARIOS, SCENARIOS
 from app.services.controls import AutopilotState, AutopilotUpdate
 from app.services.inbound_email import InboundEmailService
@@ -55,6 +55,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.inbound = inbound
     app.state.listener = listener
     app.state.mailbox = mailbox
+    if not settings.demo_mode and not settings.reviewer_token_map:
+        logger.warning("REVIEWER_TOKENS is not set: anyone who reaches this API can act as a billing supervisor")
     if settings.enable_email_listener:
         listener.start()
         logger.info("IMAP listener started (%s, folder=%s)", settings.imap_host, settings.imap_folder)
@@ -101,6 +103,28 @@ def get_mailbox(request: Request) -> MailboxService:
     service: MailboxService = request.app.state.mailbox
     return service
 
+
+def require_operator(
+    rt: RuntimeDep,
+    authorization: Annotated[str | None, Header()] = None,
+    x_operator_token: Annotated[str | None, Header()] = None,
+) -> str | None:
+    """Reviewer behind this request (``REVIEWER_TOKENS``). None when no tokens are configured."""
+    tokens = rt.settings.reviewer_token_map
+    if not tokens:
+        return None
+    presented = (x_operator_token or (authorization or "").removeprefix("Bearer ")).strip().encode()
+    reviewer = None
+    for token, name in tokens.items():  # every token is compared, so timing does not reveal which one is close
+        if hmac.compare_digest(presented, token.encode()):
+            reviewer = name
+    if reviewer is None:
+        raise HTTPException(401, "invalid or missing operator token")
+    return reviewer
+
+
+OperatorDep = Annotated[str | None, Depends(require_operator)]
+OPERATOR_ONLY = [Depends(require_operator)]
 
 InboundDep = Annotated[InboundEmailService, Depends(get_inbound)]
 MailboxDep = Annotated[MailboxService, Depends(get_mailbox)]
@@ -167,9 +191,12 @@ async def get_autopilot(rt: RuntimeDep) -> AutopilotState:
     return rt.controls.autopilot
 
 
-@app.put("/api/autopilot", response_model=AutopilotState)
+@app.put("/api/autopilot", response_model=AutopilotState, dependencies=OPERATOR_ONLY)
 async def set_autopilot(body: AutopilotUpdate, rt: RuntimeDep) -> AutopilotState:
-    state = await rt.controls.update_autopilot(body)
+    try:
+        state = await rt.controls.update_autopilot(body)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     logger.info("auto-pilot %s (ceiling $%.2f)", "ON" if state.enabled else "OFF", state.max_usd)
     rt.bus.publish({"id": None, "ticket_id": None, "type": "autopilot_changed", "node": None, "payload": state.model_dump()})
     return state
@@ -193,7 +220,7 @@ async def email_config(mailbox: MailboxDep) -> dict[str, object]:
     return mailbox.describe()
 
 
-@app.post("/api/email/test-connection")
+@app.post("/api/email/test-connection", dependencies=OPERATOR_ONLY)
 async def email_test_connection(body: MailboxConfigIn, mailbox: MailboxDep) -> dict[str, object]:
     """Log in to the real IMAP (and SMTP) server with the given credentials. Nothing is saved."""
     try:
@@ -206,7 +233,7 @@ async def email_test_connection(body: MailboxConfigIn, mailbox: MailboxDep) -> d
         raise HTTPException(504, "mail server did not answer in time") from exc
 
 
-@app.post("/api/email/save-config")
+@app.post("/api/email/save-config", dependencies=OPERATOR_ONLY)
 async def email_save_config(body: MailboxConfigIn, mailbox: MailboxDep) -> dict[str, object]:
     """Validate, persist and apply the mailbox live; (re)starts the IMAP listener without a restart."""
     try:
@@ -219,7 +246,7 @@ async def email_save_config(body: MailboxConfigIn, mailbox: MailboxDep) -> dict[
         raise HTTPException(504, "mail server did not answer in time") from exc
 
 
-@app.post("/api/email/disconnect")
+@app.post("/api/email/disconnect", dependencies=OPERATOR_ONLY)
 async def email_disconnect(mailbox: MailboxDep) -> dict[str, object]:
     return await mailbox.disconnect()
 
@@ -271,7 +298,7 @@ async def inbound_email_webhook(
     return await _ingest_payload(data, inbound, simulator=False)
 
 
-@app.post("/api/email/simulate", status_code=202)
+@app.post("/api/email/simulate", status_code=202, dependencies=OPERATOR_ONLY)
 async def simulate_inbound_email(request: Request, inbound: InboundDep) -> dict[str, object]:
     """Cockpit "Send Live Test Email": same pipeline as the webhook, tagged as a simulation.
 
@@ -299,8 +326,8 @@ async def email_status(rt: RuntimeDep, listener: ListenerDep) -> dict[str, objec
     }
 
 
-@app.post("/api/email/poll-now")
-@app.post("/api/email/poll")
+@app.post("/api/email/poll-now", dependencies=OPERATOR_ONLY)
+@app.post("/api/email/poll", dependencies=OPERATOR_ONLY)
 async def email_poll_now(listener: ListenerDep) -> dict[str, object]:
     """Check the mailbox right now (instead of waiting for the interval) and report what was found."""
     if not (listener.settings.enable_email_listener and listener.settings.imap_user):
@@ -325,9 +352,10 @@ async def scenarios(rt: RuntimeDep) -> list[dict[str, object]]:
 
 
 # ---------------------------------------------------------------------- tickets
-@app.post("/api/tickets", status_code=202, response_model=TicketCreated)
+@app.post("/api/tickets", status_code=202, response_model=TicketCreated, dependencies=OPERATOR_ONLY)
 async def create_ticket(body: TicketCreate, rt: RuntimeDep) -> TicketCreated:
-    tid = rt.submit(body.message, body.customer_email)
+    customer_email, meta = await rt.web_intake(body)
+    tid = rt.submit(body.message, customer_email, meta=meta)
     return TicketCreated(ticket_id=tid, execution_status="TRIAGING")
 
 
@@ -350,14 +378,15 @@ async def ticket_events(ticket_id: str, rt: RuntimeDep) -> list[dict[str, object
 
 
 @app.post("/api/tickets/{ticket_id}/decision", status_code=202)
-async def decide(ticket_id: str, body: DecisionRequest, rt: RuntimeDep) -> dict[str, object]:
+async def decide(ticket_id: str, body: DecisionRequest, rt: RuntimeDep, operator: OperatorDep) -> dict[str, object]:
     try:
         view = await rt.get_view(ticket_id)
     except TicketNotFoundError as exc:
         raise HTTPException(404, f"ticket {ticket_id} not found") from exc
     if view.next_nodes != ["human_gate"]:
         raise HTTPException(409, f"ticket {ticket_id} is not awaiting approval")
-    decision = HumanDecision.model_validate(body.model_dump())
+    # With operator tokens the audit trail records the token's owner, whatever name the request carries.
+    decision = HumanDecision.model_validate({**body.model_dump(), **({"reviewer": operator} if operator else {})})
     rt.resume_in_background(ticket_id, decision)
     return {"ticket_id": ticket_id, "accepted": True, "approved": decision.approved}
 
@@ -365,6 +394,28 @@ async def decide(ticket_id: str, body: DecisionRequest, rt: RuntimeDep) -> dict[
 @app.get("/api/approvals", response_model=list[TicketView])
 async def approvals(rt: RuntimeDep) -> list[TicketView]:
     return await rt.pending_approvals()
+
+
+# ------------------------------------------------------------------- case queue
+@app.get("/api/queue")
+async def case_queue(
+    rt: RuntimeDep,
+    status: Literal["OPEN", "RESOLVED", "CONTINUED"] | None = "OPEN",
+    kind: Literal["ESCALATION", "AWAITING_CUSTOMER"] | None = None,
+) -> list[dict[str, object]]:
+    return await rt.db.list_cases(status=status, kind=kind)
+
+
+@app.post("/api/queue/{ticket_id}/resolve")
+async def resolve_case(ticket_id: str, body: CaseResolution, rt: RuntimeDep, operator: OperatorDep) -> dict[str, object]:
+    """A person closes a queued case. This records the outcome; it never moves money."""
+    if await rt.db.get_case(ticket_id) is None:
+        raise HTTPException(404, f"no queued case for {ticket_id}")
+    reviewer = operator or body.reviewer
+    if not await rt.db.resolve_case(ticket_id, reviewer=reviewer, note=body.note):
+        raise HTTPException(409, f"case {ticket_id} is already closed")
+    await rt.emit(ticket_id, "case_resolved", None, {"reviewer": reviewer, "note": body.note})
+    return {"ticket_id": ticket_id, "status": "RESOLVED", "resolved_by": reviewer}
 
 
 # ----------------------------------------------------------------------- ledger
@@ -379,13 +430,13 @@ async def ledger(rt: RuntimeDep) -> dict[str, object]:
 
 
 # ------------------------------------------------------------------------ admin
-@app.post("/api/admin/faults")
+@app.post("/api/admin/faults", dependencies=OPERATOR_ONLY)
 async def inject_fault(body: FaultRequest, rt: RuntimeDep) -> dict[str, object]:
     rt.deps.faults.fail_next(body.tool, body.times, body.kind)
     return {"armed": body.model_dump()}
 
 
-@app.post("/api/admin/reset")
+@app.post("/api/admin/reset", dependencies=OPERATOR_ONLY)
 async def reset(rt: RuntimeDep) -> dict[str, object]:
     rt.deps.faults.clear()
     await seed_database(rt.db, force=True)

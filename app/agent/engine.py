@@ -8,9 +8,12 @@ hallucinated amounts and to prompt-injected payout instructions by construction.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from app.agent.temporal import DateHint
 from app.models.schemas import (
     ClaimCategory,
     CustomerRecord,
@@ -106,32 +109,107 @@ def _claimed(dispute_amount: float | None, claimed_amounts: list[float] | None) 
     return out
 
 
+@dataclass(slots=True)
+class TargetSelection:
+    targets: list[TransactionRecord] = field(default_factory=list)
+    ambiguous: bool = False  # several charges fit what the customer said and nothing separates them
+    date_conflict: bool = False  # the cited date rules out every charge that otherwise fits
+
+
+def _same_purchase(group: list[TransactionRecord]) -> bool:
+    """Repeats of one purchase (a duplicate chain): the customer cannot mean one rather than the other."""
+    ordered = sorted(group, key=lambda t: t.created_at)
+    return len({t.merchant_descriptor for t in group}) == 1 and all(
+        b.created_at - a.created_at <= DUPLICATE_WINDOW for a, b in zip(ordered, ordered[1:], strict=False)
+    )
+
+
+def _describes(product: str, descriptor: str) -> bool:
+    """Does the customer's wording name this statement descriptor? ("Pro Monthly" / SENTINEL*PRO MONTHLY)"""
+    words = [w for w in re.findall(r"[a-z0-9]+", descriptor.split("*")[-1].lower()) if len(w) > 2]
+    return bool(words) and all(w in product.lower() for w in words)
+
+
+def _refine(candidates: list[TransactionRecord], card_last4: str | None, product: str | None) -> list[TransactionRecord]:
+    """Card and product only tell equal candidates apart; a detail that fits none of them is ignored."""
+    narrowed = candidates
+    if card_last4 is not None:
+        narrowed = [t for t in narrowed if t.card_last4 == card_last4] or narrowed
+    if product is not None:
+        narrowed = [t for t in narrowed if _describes(product, t.merchant_descriptor)] or narrowed
+    return narrowed
+
+
+def resolve_targets(
+    txns: list[TransactionRecord],
+    *,
+    referenced_ids: list[str],
+    dispute_amount: float | None,
+    claimed_amounts: list[float] | None = None,
+    date_hint: DateHint | None = None,
+    repeat_claim: bool = False,
+    card_last4: str | None = None,
+    product: str | None = None,
+) -> TargetSelection:
+    """Which transactions is the customer talking about? Explicit ids > amount (+ date) > the only charge.
+
+    ``repeat_claim``: the customer says they were charged more than once, so equal charges are the subject
+    of the complaint and the later one is the one disputed.
+
+    Never guesses: when the customer cites ids or amounts that are not on the ledger, a date that rules
+    the charge out, or nothing that separates several charges, no target is returned (the planner asks
+    for clarification instead of moving money on a charge the customer did not dispute).
+    """
+    if referenced_ids:
+        return TargetSelection([t for t in txns if t.id in referenced_ids])
+    picked = TargetSelection()
+    amounts = _claimed(dispute_amount, claimed_amounts)
+    if amounts:
+        for a in amounts:
+            matched = [t for t in txns if abs(t.amount - a) < 0.005]
+            if not matched:
+                continue
+            if date_hint is not None:
+                dated = [t for t in matched if date_hint.contains(t.created_at)]
+                if not dated:
+                    picked.date_conflict = True
+                    continue
+                matched = dated
+            matched = _refine(matched, card_last4, product)
+            if len(matched) > 1 and not repeat_claim and not _same_purchase(matched):
+                picked.ambiguous = True
+                continue
+            best = max(matched, key=lambda t: t.created_at)
+            if best not in picked.targets:
+                picked.targets.append(best)
+        return picked
+    candidates = list(txns)
+    if date_hint is not None:
+        candidates = [t for t in txns if date_hint.contains(t.created_at)]
+        picked.date_conflict = bool(txns) and not candidates
+    candidates = _refine(candidates, card_last4, product)
+    if len(candidates) == 1:
+        picked.targets = candidates
+    return picked
+
+
 def select_targets(
     txns: list[TransactionRecord],
     *,
     referenced_ids: list[str],
     dispute_amount: float | None,
     claimed_amounts: list[float] | None = None,
+    date_hint: DateHint | None = None,
+    repeat_claim: bool = False,
 ) -> list[TransactionRecord]:
-    """Which transactions is the customer talking about? Explicit ids > amount match > the only charge.
-
-    Never guesses: when the customer cites ids or amounts that are not on the ledger, or cites
-    nothing while several charges exist, no target is returned (the planner asks for clarification
-    instead of moving money on a charge the customer did not dispute).
-    """
-    if referenced_ids:
-        return [t for t in txns if t.id in referenced_ids]
-    amounts = _claimed(dispute_amount, claimed_amounts)
-    if amounts:
-        targets: list[TransactionRecord] = []
-        for a in amounts:
-            matched = [t for t in txns if abs(t.amount - a) < 0.005]
-            if matched:
-                best = max(matched, key=lambda t: t.created_at)
-                if best not in targets:
-                    targets.append(best)
-        return targets
-    return list(txns) if len(txns) == 1 else []
+    return resolve_targets(
+        txns,
+        referenced_ids=referenced_ids,
+        dispute_amount=dispute_amount,
+        claimed_amounts=claimed_amounts,
+        date_hint=date_hint,
+        repeat_claim=repeat_claim,
+    ).targets
 
 
 @dataclass(slots=True)
@@ -141,6 +219,7 @@ class Investigation:
     targets: list[TransactionRecord]
     findings: list[Finding] = field(default_factory=list)
     missing_references: list[str] = field(default_factory=list)
+    claims_cited: bool = False  # the customer pointed at something specific (an amount or a date)
 
 
 def investigate(
@@ -152,6 +231,9 @@ def investigate(
     dispute_amount: float | None,
     now: datetime,
     claimed_amounts: list[float] | None = None,
+    date_hint: DateHint | None = None,
+    card_last4: str | None = None,
+    product: str | None = None,
 ) -> Investigation:
     if customer is None:
         return Investigation(
@@ -161,13 +243,23 @@ def investigate(
             findings=[Finding(kind="CUSTOMER_NOT_FOUND", detail="no account matches the supplied identifiers")],
         )
     present = {t.id for t in txns}
+    amounts_cited = bool(_claimed(dispute_amount, claimed_amounts))
+    selection = resolve_targets(
+        txns,
+        referenced_ids=referenced_ids,
+        dispute_amount=dispute_amount,
+        claimed_amounts=claimed_amounts,
+        date_hint=date_hint,
+        repeat_claim=category == "DUPLICATE_CHARGE",
+        card_last4=card_last4,
+        product=product,
+    )
     inv = Investigation(
         customer=customer,
         transactions=txns,
-        targets=select_targets(
-            txns, referenced_ids=referenced_ids, dispute_amount=dispute_amount, claimed_amounts=claimed_amounts
-        ),
+        targets=selection.targets,
         missing_references=[r for r in referenced_ids if r not in present],
+        claims_cited=amounts_cited or date_hint is not None,
     )
     if not txns:
         inv.findings.append(Finding(kind="NO_MATCHING_TRANSACTION", detail="no transactions in the lookback window"))
@@ -176,8 +268,12 @@ def investigate(
         inv.findings.append(
             Finding(kind="REFERENCE_NOT_ON_ACCOUNT", detail=f"cited charges {inv.missing_references} are not on this account")
         )
+    elif selection.date_conflict:
+        inv.findings.append(Finding(kind="DATE_MISMATCH", detail="no matching charge falls near the date the customer cited"))
     elif not inv.targets:
-        if _claimed(dispute_amount, claimed_amounts):
+        if selection.ambiguous:
+            inv.findings.append(Finding(kind="TARGET_AMBIGUOUS", detail="several charges match the amount the customer cited"))
+        elif amounts_cited:
             inv.findings.append(Finding(kind="AMOUNT_NOT_ON_LEDGER", detail="no charge matches the amounts the customer cited"))
         else:
             inv.findings.append(Finding(kind="TARGET_AMBIGUOUS", detail=f"{len(txns)} charges on file and none was specified"))
@@ -229,6 +325,50 @@ def inflated_amount_requested(txns: list[TransactionRecord], claimed_amounts: li
     return bool(on_ledger) and any(u > max(on_ledger) for u in unsupported)
 
 
+def partial_amount_requested(
+    targets: list[TransactionRecord], txns: list[TransactionRecord], claimed_amounts: list[float]
+) -> bool:
+    """The customer asks for less than the charge ("$10 of my $29"). Refunds are all-or-nothing here, so
+    this goes to a human (POL-ESC-002). The refunded/remaining part of an earlier partial refund is not one."""
+    ledger = [t.amount for t in txns]
+    for target in targets:
+        known = [*ledger, target.refunded_amount, target.refundable_amount]
+        for amount in claimed_amounts:
+            if 0 < amount < target.amount and all(abs(amount - k) >= 0.005 for k in known):
+                return True
+    return False
+
+
+def unverified_policies(action: ResolutionAction, known_clause_ids: Collection[str]) -> list[str]:
+    """Policy clauses an action cites that the handbook does not contain."""
+    return [p for p in action.policy_refs if p not in known_clause_ids]
+
+
+def undisputed_refunds(
+    *, inv: Investigation, action: ResolutionAction, category: ClaimCategory, refund_requested: bool
+) -> list[str]:
+    """Refunds the policy mandates but the customer never asked for (POL-HITL-001): they need a human.
+
+    The customer asked for a refund and either named no specific charge or named this one (a repeat of the
+    named charge counts: same amount). Anything else is a finding of ours, not their request.
+    """
+    if action.action_type != "REFUND" or category == "FRAUD_CLAIM":
+        return []
+    ids = [r.transaction_id for r in action.refunds]
+    if category == "GENERAL" and not refund_requested:
+        return ids
+    if not inv.targets:
+        return []
+    by_id = {t.id: t for t in inv.transactions}
+    named_ids = {t.id for t in inv.targets}
+    named_amounts = [t.amount for t in inv.targets]
+    return [
+        tid
+        for tid in ids
+        if tid not in named_ids and all(abs(by_id[tid].amount - a) >= 0.005 for a in named_amounts)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Risk
 # ---------------------------------------------------------------------------
@@ -242,6 +382,8 @@ def assess_risk(
     hitl_threshold: float,
     now: datetime,
     sender_mismatch: bool = False,
+    identity_unverified: bool = False,
+    undisputed_refund: bool = False,
 ) -> RiskAssessment:
     score = 0.0
     flags: list[str] = []
@@ -249,6 +391,13 @@ def assess_risk(
         # Request came from an address that does not own the account (POL-ID-001): identity unverified.
         score += 0.6
         flags.append("sender_not_account_owner")
+    if identity_unverified:
+        # Identity rests on the message text, or the sender failed authentication (POL-ID-001).
+        score += 0.6
+        flags.append("identity_unverified")
+    if undisputed_refund:
+        score += 0.3
+        flags.append("refund_not_requested")
     kinds = {f.kind for f in findings}
     if category == "FRAUD_CLAIM":
         score += 0.6
@@ -282,14 +431,19 @@ def assess_risk(
 
 
 def requires_human_approval(
-    action: ResolutionAction, risk: RiskAssessment, *, injection_detected: bool, hitl_threshold: float
+    action: ResolutionAction,
+    risk: RiskAssessment,
+    *,
+    injection_detected: bool,
+    hitl_threshold: float,
+    undisputed_refund: bool = False,
 ) -> bool:
-    """SPEC gate: payout > threshold OR (payout on high risk) OR manipulation attempt detected."""
+    """SPEC gate: payout > threshold OR payout on high risk OR a payout nobody asked for OR manipulation attempt."""
     if injection_detected:
         return True
     if action.action_type != "REFUND":
         return False
-    return action.total_amount > hitl_threshold or risk.level == "HIGH"
+    return action.total_amount > hitl_threshold or risk.level == "HIGH" or undisputed_refund
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +455,10 @@ class PlanResult:
 
     action: ResolutionAction | None
     requery_lookback_days: int | None = None
+
+
+_LOOK_FURTHER_BACK = frozenset({"AMOUNT_NOT_ON_LEDGER", "DATE_MISMATCH", "NO_MATCHING_TRANSACTION"})
+_NOT_REFUNDABLE = frozenset({"ALREADY_REFUNDED", "NOT_CAPTURED", "OUT_OF_REFUND_WINDOW"})
 
 
 def _refund_action(
@@ -324,10 +482,14 @@ def plan_resolution(
     tool_failure: bool,
     injection_detected: bool,
     refund_requested: bool = False,
+    partial_requested: bool = False,
+    cancellation_requested: bool = False,
+    currency_unconfirmed: bool = False,
 ) -> PlanResult:
     """``refund_requested``: the customer explicitly asked for money back. Without it, only the
-    policy-mandated refunds (duplicates, gateway errors, verified fraud) are made — a plain
-    in-window refund is never issued on, e.g., a cancellation request or a billing question."""
+    policy-mandated refunds (duplicates, gateway errors, verified fraud) are proposed — a plain
+    in-window refund is never issued on, e.g., a cancellation request or a billing question.
+    ``partial_requested`` / ``cancellation_requested``: reserved for human review (POL-ESC-002)."""
     if tool_failure:
         return PlanResult(
             ResolutionAction(
@@ -350,6 +512,10 @@ def plan_resolution(
     if inv.missing_references and lookback_days < MAX_LOOKBACK_DAYS:
         # Planner -> DBInspector loop: the customer cited charges we have not loaded yet.
         return PlanResult(action=None, requery_lookback_days=MAX_LOOKBACK_DAYS)
+    kinds = {f.kind for f in inv.findings}
+    if lookback_days < MAX_LOOKBACK_DAYS and inv.claims_cited and kinds & _LOOK_FURTHER_BACK:
+        # The charge the customer described may simply be older than the window we loaded.
+        return PlanResult(action=None, requery_lookback_days=MAX_LOOKBACK_DAYS)
     if inv.missing_references:
         # POL-ID-001: the cited charge is not on this account (does not exist / belongs to someone else).
         return PlanResult(
@@ -363,7 +529,6 @@ def plan_resolution(
         )
 
     by_id = {t.id: t for t in inv.transactions}
-    kinds = {f.kind for f in inv.findings}
     secondary: list[SecondaryAction] = ["CRM_NOTE"]
     risky_account = inv.customer.chargeback_count >= 3
 
@@ -392,6 +557,27 @@ def plan_resolution(
             )
         )
 
+    if currency_unconfirmed:
+        return PlanResult(
+            ResolutionAction(
+                action_type="REQUEST_INFO",
+                reason_code="CURRENCY_UNCONFIRMED",
+                policy_refs=["POL-ID-001"],
+                secondary_actions=["CRM_NOTE"],
+                customer_facing_reason="Our charges are in US dollars, so we could not match the amount you mentioned.",
+            )
+        )
+    if partial_requested:
+        return PlanResult(
+            ResolutionAction(
+                action_type="ESCALATE",
+                reason_code="PARTIAL_REFUND_REVIEW",
+                policy_refs=["POL-ESC-002"],
+                secondary_actions=["CRM_NOTE"],
+                customer_facing_reason="A billing specialist needs to review your partial refund request.",
+            )
+        )
+
     refunds: dict[str, float] = {}
     policies: list[str] = []
     reason_code = ""
@@ -417,8 +603,20 @@ def plan_resolution(
         reason_code = reason_code or "DUPLICATE_CHARGE"
         reason = reason or "You were charged twice for the same purchase; the duplicate charge will be refunded."
 
+    # Targets are judged one by one: a charge that cannot be refunded never sinks one that can.
+    eligible = [tid for f in inv.findings if f.kind == "ELIGIBLE_REFUND" for tid in f.transaction_ids]
+    mixed = bool(eligible and refund_requested and kinds & _NOT_REFUNDABLE)
+    if refunds and refund_requested and eligible:
+        # A mandated refund on one charge does not answer a request about a different charge.
+        taken = [by_id[tid].amount for tid in refunds]
+        for tid in eligible:
+            if all(abs(by_id[tid].amount - a) >= 0.005 for a in taken):
+                refunds[tid] = by_id[tid].refundable_amount
+                if "POL-REF-001" not in policies:
+                    policies.append("POL-REF-001")
+
     if not refunds:
-        if category in ("REFUND_REQUEST", "DUPLICATE_CHARGE"):
+        if category in ("REFUND_REQUEST", "DUPLICATE_CHARGE") and not mixed:
             if "ALREADY_REFUNDED" in kinds:
                 return PlanResult(
                     ResolutionAction(
@@ -453,7 +651,7 @@ def plan_resolution(
                         customer_facing_reason=f"The charge is outside the {window}-day refund window for your plan.",
                     )
                 )
-            if kinds & {"AMOUNT_NOT_ON_LEDGER", "TARGET_AMBIGUOUS"}:
+            if kinds & {"AMOUNT_NOT_ON_LEDGER", "TARGET_AMBIGUOUS", "DATE_MISMATCH"}:
                 return PlanResult(
                     ResolutionAction(
                         action_type="REQUEST_INFO",
@@ -463,13 +661,25 @@ def plan_resolution(
                         customer_facing_reason="We could not tell which charge your request refers to.",
                     )
                 )
-            eligible = [tid for f in inv.findings if f.kind == "ELIGIBLE_REFUND" for tid in f.transaction_ids]
-            if eligible and refund_requested:
-                refunds = {tid: by_id[tid].refundable_amount for tid in eligible}
-                policies.append("POL-REF-001")
-                reason_code = "WITHIN_REFUND_WINDOW"
-                reason = "Your request falls within the refund window for your plan."
+        if category in ("REFUND_REQUEST", "DUPLICATE_CHARGE") and eligible and refund_requested:
+            refunds = {tid: by_id[tid].refundable_amount for tid in eligible}
+            policies.append("POL-REF-001")
+            reason_code = "WITHIN_REFUND_WINDOW"
+            reason = "Your request falls within the refund window for your plan."
+            if mixed:
+                policies.append("POL-REF-002")
+                reason += " Another charge you mentioned is not eligible, so it is not included in this refund."
         if not refunds:
+            if cancellation_requested:
+                return PlanResult(
+                    ResolutionAction(
+                        action_type="ESCALATE",
+                        reason_code="CANCELLATION_REVIEW",
+                        policy_refs=["POL-ESC-002"],
+                        secondary_actions=["CRM_NOTE"],
+                        customer_facing_reason="A billing specialist needs to review your cancellation request.",
+                    )
+                )
             return PlanResult(
                 ResolutionAction(
                     action_type="ESCALATE",

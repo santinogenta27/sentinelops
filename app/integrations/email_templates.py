@@ -75,6 +75,7 @@ def render_supervisor_alert(
     subject: str | None,
     summary: str,
     cockpit_url: str,
+    review_only: bool = False,
 ) -> str:
     rows = [
         ("Ticket", ticket_id),
@@ -93,9 +94,14 @@ def render_supervisor_alert(
         f'<span style="display:inline-block;margin:0 6px 6px 0;padding:2px 8px;border-radius:999px;background:#fef3c7;color:#92400e;font-size:12px;">{html.escape(f)}</span>'
         for f in risk_flags
     )
+    intro = (
+        "<b>🔎 A customer case needs a person.</b> The agent took no financial action and told the customer a specialist will follow up."
+        if review_only
+        else "<b>⚠️ A new customer email requires billing supervisor approval.</b> "
+        "The agent paused execution at the Human-in-the-Loop gate; no money has moved."
+    )
     inner = (
-        '<p style="margin:0 0 14px;line-height:1.6;"><b>⚠️ A new customer email requires billing supervisor approval.</b> '
-        "The agent paused execution at the Human-in-the-Loop gate; no money has moved.</p>"
+        f'<p style="margin:0 0 14px;line-height:1.6;">{intro}</p>'
         f'<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 14px;font-size:14px;">{table}</table>'
         f'<div style="margin:0 0 12px;">{flags}</div>'
         f'<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;font-size:13px;line-height:1.55;margin:0 0 18px;">{_paragraphs(summary)}</div>'
@@ -103,8 +109,8 @@ def render_supervisor_alert(
         'padding:10px 18px;border-radius:8px;font-weight:700;">Review in SentinelOps Cockpit</a>'
     )
     return _shell(
-        preheader=f"Approval needed: {ticket_id}",
-        header_label="Approval required",
+        preheader=f"{'Review' if review_only else 'Approval'} needed: {ticket_id}",
+        header_label="Review needed" if review_only else "Approval required",
         header_color="#d97706",
         inner=inner,
         footer="Automated alert · SentinelOps Human-in-the-Loop gate",

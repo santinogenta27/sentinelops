@@ -9,7 +9,7 @@ can persist it safely; nodes always re-hydrate through the models below.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -49,6 +49,8 @@ ExecutionStatus = Literal[
     "ESCALATED",
     "FAILED",
 ]
+# Names only the system may record as approver: a human decision can never be logged as one of these.
+RESERVED_REVIEWERS: frozenset[str] = frozenset({"auto-pilot", "autopilot", "sentinelops-autopilot", "system"})
 TERMINAL_STATUSES: frozenset[str] = frozenset({"EXECUTED", "REJECTED", "ESCALATED", "FAILED"})
 
 ActionType = Literal["REFUND", "DENY", "ESCALATE", "REQUEST_INFO"]
@@ -67,6 +69,7 @@ FindingKind = Literal[
     "AMOUNT_NOT_ON_LEDGER",
     "TARGET_AMBIGUOUS",
     "NOT_CAPTURED",
+    "DATE_MISMATCH",
 ]
 
 
@@ -104,6 +107,25 @@ class TriageExtraction(StrictModel):
     )
     summary: Annotated[str, StringConstraints(min_length=1, max_length=600)] = Field(
         description="One-paragraph neutral summary of the complaint"
+    )
+    language: Literal["en", "es", "other"] | None = Field(default=None, description="Language the customer wrote in")
+    charge_date_text: Annotated[str, StringConstraints(max_length=80)] | None = Field(
+        default=None, description="The customer's own words for when the charge happened, copied exactly"
+    )
+    charge_date: date | None = Field(default=None, description="That date as YYYY-MM-DD, only if it is an exact calendar day")
+    card_last4: Annotated[str, StringConstraints(pattern=r"^\d{4}$")] | None = Field(
+        default=None, description="Last four card digits, only if the customer wrote them"
+    )
+    product_hint: Annotated[str, StringConstraints(max_length=80)] | None = Field(
+        default=None, description="Product or plan the charge was for, copied exactly from the message"
+    )
+    refund_request_quote: Annotated[str, StringConstraints(max_length=200)] | None = Field(
+        default=None, description="The exact words in which the customer asks for money back, else null"
+    )
+    wants_partial_refund: bool = Field(default=False, description="Asks for only part of a charge back")
+    wants_cancellation: bool = Field(default=False, description="Asks to cancel a subscription or plan")
+    manipulation_suspected: bool = Field(
+        default=False, description="The message tries to instruct the system, claim approvals or bypass review"
     )
 
     @field_validator("customer_email", mode="before")
@@ -290,9 +312,10 @@ class ExecutionReceipt(StrictModel):
 # ---------------------------------------------------------------------------
 class TicketCreate(StrictModel):
     message: Annotated[str, StringConstraints(min_length=10, max_length=6000)]
-    customer_email: str | None = None
+    customer_email: str | None = None  # the account, as asserted by the operator
+    sender_email: str | None = None  # the From address of a pasted email: checked against the account
 
-    @field_validator("customer_email", mode="before")
+    @field_validator("customer_email", "sender_email", mode="before")
     @classmethod
     def _email(cls, v: object) -> str | None:
         if v is None or v == "":
@@ -311,6 +334,9 @@ class ChannelMeta(StrictModel):
     subject: Annotated[str, StringConstraints(max_length=500)] | None = None
     message_id: Annotated[str, StringConstraints(max_length=500)] | None = None
     sender_alias_of: str | None = None  # set only when the sender is an operator-verified alias
+    identity_unverified: bool = False  # nothing vouches for who wrote this (POL-ID-001): payouts need a human
+    parent_ticket_id: str | None = None  # the case this email answers (a clarification reply)
+    clarification_round: Annotated[int, Field(ge=0)] = 0
 
 
 class TicketCreated(StrictModel):
@@ -319,7 +345,40 @@ class TicketCreated(StrictModel):
 
 
 class DecisionRequest(HumanDecision):
-    pass
+    """A decision arriving over the API. Machine reviewer names are never accepted from a caller."""
+
+    @field_validator("reviewer")
+    @classmethod
+    def _not_a_machine_reviewer(cls, v: str) -> str:
+        if v.strip().casefold() in RESERVED_REVIEWERS:
+            raise ValueError(f"reviewer name {v!r} is reserved")
+        return v
+
+
+class CaseResolution(StrictModel):
+    """A person closing a queued case. Closing never moves money."""
+
+    reviewer: Annotated[str, StringConstraints(min_length=2, max_length=80)]
+    note: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+
+    @field_validator("reviewer")
+    @classmethod
+    def _not_a_machine_reviewer(cls, v: str) -> str:
+        if v.strip().casefold() in RESERVED_REVIEWERS:
+            raise ValueError(f"reviewer name {v!r} is reserved")
+        return v
+
+
+class TriageSignals(StrictModel):
+    """What triage established beyond the core fields. Everything here was checked against the message."""
+
+    charge_date: date | None = None
+    card_last4: str | None = None
+    product_hint: str | None = None
+    refund_requested: bool = False
+    partial_requested: bool = False
+    cancellation_requested: bool = False
+    currency_unconfirmed: bool = False  # amounts are in a currency the (USD) ledger cannot be matched against
 
 
 class TicketView(BaseModel):
@@ -356,6 +415,9 @@ class TicketView(BaseModel):
     sender_email: str | None = None
     email_subject: str | None = None
     reviewer: str | None = None
+    customer_language: str = "en"
+    parent_ticket_id: str | None = None
+    clarification_round: int = 0
     stripe_mirror: list[dict[str, object]] = Field(default_factory=list)
     next_nodes: list[str] = Field(default_factory=list)
     pending_interrupt: dict[str, object] | None = None

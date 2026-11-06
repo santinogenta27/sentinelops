@@ -26,6 +26,8 @@ from tests.conftest import make_settings
 
 BOB_MAIL = ("Bob Chen <bob@startup.io>", "Double charge on our Team Annual plan",
             "We were double charged $480 for the Team Annual plan two days ago. Please reverse the duplicate.")
+ALICE_MAIL = ("Alice Moreno <alice@acme-corp.com>", "Charged twice",
+              "I was charged twice for my Cloud Pro plan this week, $149 each time. Please refund the duplicate.")
 CAROL_MAIL = ("carol@gmail.com", "Unauthorized charge",
               "I do not recognize a charge of $899.99 for a hardware kit. My card was stolen.")
 
@@ -85,14 +87,14 @@ def _mail(sender: str, subject: str, body: str, mid: str) -> Any:
 # ======================================================================= policy unit
 class TestAutopilotPolicy:
     BASE: dict[str, Any] = {
-        "resolution_action": {"action_type": "REFUND", "refunds": [{"transaction_id": "t", "amount": 480.0}]},
-        "risk": {"level": "LOW", "score": 0.2, "flags": ["payout_above_200"]},
+        "resolution_action": {"action_type": "REFUND", "refunds": [{"transaction_id": "t", "amount": 150.0}]},
+        "risk": {"level": "LOW", "score": 0.2, "flags": ["payout_above_100"]},
         "injection_signals": [],
     }
 
     def test_policy_compliant_payout_is_eligible(self) -> None:
         v = autopilot_verdict(self.BASE, enabled=True, max_usd=1000)
-        assert v.eligible and v.amount == 480.0 and v.reasons == []
+        assert v.eligible and v.amount == 150.0 and v.reasons == []
 
     @pytest.mark.parametrize(
         ("patch", "enabled", "ceiling", "reason"),
@@ -101,7 +103,10 @@ class TestAutopilotPolicy:
             ({"injection_signals": ["override_instructions"]}, True, 1000, "injection"),
             ({"risk": {"level": "HIGH", "flags": ["fraud_claim"]}}, True, 1000, "HIGH"),
             ({"risk": {"level": "MEDIUM", "flags": ["sender_not_account_owner"]}}, True, 1000, "account owner"),
-            ({}, True, 300, "ceiling"),
+            ({}, True, 120, "ceiling"),
+            ({"resolution_action": {"action_type": "REFUND", "refunds": [{"transaction_id": "t", "amount": 480.0}]}}, True, 1000, "ceiling"),
+            ({"risk": {"level": "MEDIUM", "flags": ["refund_not_requested"]}}, True, 1000, "did not ask"),
+            ({"risk": {"level": "MEDIUM", "flags": ["identity_unverified"]}}, True, 1000, "not verified"),
             ({"resolution_action": {"action_type": "ESCALATE", "refunds": []}}, True, 1000, "plain refund"),
         ],
     )
@@ -117,19 +122,20 @@ async def test_controls_persist_across_restarts(tmp_path: Path) -> None:
     controls = RuntimeControls(db, settings)
     await controls.load()
     assert controls.autopilot.enabled is True
-    await controls.update_autopilot(AutopilotUpdate(enabled=False, max_usd=250))
+    await controls.update_autopilot(AutopilotUpdate(enabled=False, max_usd=150))
     reloaded = RuntimeControls(db, settings)
     await reloaded.load()
-    assert reloaded.autopilot.enabled is False and reloaded.autopilot.max_usd == 250
+    assert reloaded.autopilot.enabled is False and reloaded.autopilot.max_usd == 150
 
 
 # ================================================================= zero-touch runs
 async def test_autopilot_executes_policy_compliant_email_end_to_end(tmp_path: Path) -> None:
     stripe = FakeStripe()
-    settings = make_settings(tmp_path, autopilot_default=True, stripe_api_key="sk_test_fake")
+    # Auto-Pilot only has work between the HITL threshold and its own $200 limit.
+    settings = make_settings(tmp_path, autopilot_default=True, stripe_api_key="sk_test_fake", hitl_threshold_usd=100)
     rt = await _runtime(settings, stripe)
     try:
-        res = await InboundEmailService(rt).ingest(_mail(*BOB_MAIL, mid="<ap-bob@mail>"), wait=True)
+        res = await InboundEmailService(rt).ingest(_mail(*ALICE_MAIL, mid="<ap-alice@mail>"), wait=True)
         view = await rt.get_view(res.ticket_id)
         assert view.execution_status == "EXECUTED" and view.next_nodes == []
         assert view.requires_human_approval and view.human_approved is True and view.reviewer == AUTOPILOT_REVIEWER
@@ -137,12 +143,12 @@ async def test_autopilot_executes_policy_compliant_email_end_to_end(tmp_path: Pa
         assert "interrupt" in events and "autopilot_approved" in events, "the gate is still raised and audited"
         assert "supervisor_alert" not in events and await rt.db.list_supervisor_alerts() == []
         [refund] = await rt.db.list_refunds()
-        assert refund["amount"] == 480.0 and refund["approved_by"] == AUTOPILOT_REVIEWER
+        assert refund["amount"] == 149.0 and refund["approved_by"] == AUTOPILOT_REVIEWER
         [mail] = await rt.db.list_outbox()
-        assert mail["to_address"] == "bob@startup.io"
+        assert mail["to_address"] == "alice@acme-corp.com"
         # mirrored into Stripe test mode: original charge + refund, idempotency keyed by the ledger refund
-        assert len(stripe.payments) == 1 and stripe.payments[0]["amount"] == 48000
-        assert len(stripe.refunds) == 1 and stripe.refunds[0]["amount"] == 48000 and stripe.refunds[0]["reason"] == "duplicate"
+        assert len(stripe.payments) == 1 and stripe.payments[0]["amount"] == 14900
+        assert len(stripe.refunds) == 1 and stripe.refunds[0]["amount"] == 14900 and stripe.refunds[0]["reason"] == "duplicate"
         assert stripe.refunds[0]["key"] == f"sentinelops-refund-{refund['id']}"
         assert stripe.refunds[0]["metadata"]["ticket_id"] == res.ticket_id
         [m] = view.stripe_mirror
@@ -173,14 +179,14 @@ async def test_autopilot_never_approves_high_risk_or_injection(tmp_path: Path) -
 
 
 async def test_autopilot_respects_ceiling_and_off_switch(tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, autopilot_default=True)
+    settings = make_settings(tmp_path, autopilot_default=True, hitl_threshold_usd=100)
     rt = await _runtime(settings)
     try:
-        await rt.controls.update_autopilot(AutopilotUpdate(max_usd=300))
-        tid, _ = await rt.run_ticket("I was double charged $480 for the Team Annual plan.", "bob@startup.io")
+        await rt.controls.update_autopilot(AutopilotUpdate(max_usd=120))
+        tid, _ = await rt.run_ticket("I was double charged $149 for the Cloud Pro plan.", "alice@acme-corp.com")
         assert (await rt.get_view(tid)).next_nodes == ["human_gate"]
-        await rt.controls.update_autopilot(AutopilotUpdate(enabled=False, max_usd=1000))
-        tid2, _ = await rt.run_ticket("I was double charged $480 for the Team Annual plan.", "bob@startup.io")
+        await rt.controls.update_autopilot(AutopilotUpdate(enabled=False, max_usd=200))
+        tid2, _ = await rt.run_ticket("I was double charged $149 for the Cloud Pro plan.", "alice@acme-corp.com")
         events = [e["type"] for e in await rt.db.list_events(tid2)]
         assert (await rt.get_view(tid2)).next_nodes == ["human_gate"] and "autopilot_blocked" not in events
     finally:
@@ -344,14 +350,14 @@ async def test_listener_reuses_one_imap_session(tmp_path: Path) -> None:
 
 
 async def test_verified_alias_sender_gets_zero_touch_refund(tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, autopilot_default=True)
+    settings = make_settings(tmp_path, autopilot_default=True, hitl_threshold_usd=100)
     rt = await _runtime(settings)
     try:
-        await rt.db.set_customer_alias("Tester@Gmail.com", "cus_bob00001")
+        await rt.db.set_customer_alias("Tester@Gmail.com", "cus_alice001")
         res = await InboundEmailService(rt).ingest(
-            _mail("Tester <tester@gmail.com>", BOB_MAIL[1], BOB_MAIL[2], mid="<alias@mail>"), wait=True)
+            _mail("Tester <tester@gmail.com>", ALICE_MAIL[1], ALICE_MAIL[2], mid="<alias@mail>"), wait=True)
         view = await rt.get_view(res.ticket_id)
-        assert res.sender_is_customer and view.customer_email == "bob@startup.io"
+        assert res.sender_is_customer and view.customer_email == "alice@acme-corp.com"
         assert "sender_not_account_owner" not in (view.risk or {}).get("flags", [])  # type: ignore[operator]
         assert view.execution_status == "EXECUTED" and view.reviewer == AUTOPILOT_REVIEWER
         [mail] = await rt.db.list_outbox()
@@ -374,9 +380,10 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
 
 
 def test_api_autopilot_stripe_and_mailbox_endpoints(client: TestClient) -> None:
-    assert client.get("/api/autopilot").json() == {"enabled": False, "max_usd": 1000.0}
+    assert client.get("/api/autopilot").json() == {"enabled": False, "max_usd": 200.0}
     assert client.put("/api/autopilot", json={"enabled": True}).json()["enabled"] is True
     assert client.put("/api/autopilot", json={"max_usd": -1}).status_code == 422
+    assert client.put("/api/autopilot", json={"max_usd": 201}).status_code == 422, "the $200 limit is not configurable"
     assert client.put("/api/autopilot", json={"bogus": 1}).status_code == 422
     health = client.get("/api/health").json()
     assert health["autopilot"]["enabled"] is True and health["stripe"]["mode"] == "disabled"

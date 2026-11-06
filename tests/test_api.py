@@ -75,7 +75,7 @@ def test_full_hitl_flow_over_http(client: TestClient) -> None:
 
 def test_fault_injection_endpoint_drives_self_correction(client: TestClient) -> None:
     assert client.post("/api/admin/faults", json={"tool": "db.query_transactions", "times": 2, "kind": "timeout"}).status_code == 200
-    tid = client.post("/api/tickets", json={"message": "Refund my $29 Pro Monthly charge please. erin@designhub.co"}).json()["ticket_id"]
+    tid = client.post("/api/tickets", json={"message": "Refund my $29 Pro Monthly charge please.", "customer_email": "erin@designhub.co"}).json()["ticket_id"]
     t = wait_for(client, tid, {"EXECUTED", "ESCALATED", "FAILED"})
     assert t["execution_status"] == "EXECUTED" and t["tool_error_count"] == 2
 

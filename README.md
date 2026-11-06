@@ -61,9 +61,38 @@ Python's `tempfile`, so it follows `TEMP`/`TMP` (`TMPDIR` on macOS/Linux).
 | `HITL_THRESHOLD_USD` | `200` | Human approval threshold |
 | `JUDGE_PASS_THRESHOLD` | `0.85` | Minimum faithfulness score |
 | `MAX_TOOL_RETRIES` / `MAX_REDRAFTS` | `3` / `2` | Self-correction budgets (ledger queries are additionally capped at 3 attempts by POL-ESC-001) |
-| `AUTOPILOT_DEFAULT` / `AUTOPILOT_MAX_USD` | `true` / `1000` | Initial Auto-Pilot state and automatic-approval ceiling |
+| `AUTOPILOT_DEFAULT` / `AUTOPILOT_MAX_USD` | `true` / `200` | Initial Auto-Pilot state and automatic-approval ceiling (never above the fixed $200 limit) |
+| `REVIEWER_TOKENS` | — | `name:token,name2:token2`. When set, operator actions need `X-Operator-Token` (or `Authorization: Bearer`) and the audit trail records the token's owner. Set it on any shared or public deployment |
 | `STRIPE_API_KEY` / `STRIPE_MIRROR_REFUNDS` | — / `true` | `sk_test_…` key for the Stripe dashboard and the refund mirror |
 | `EMAIL_LOOKBACK_MINUTES` / `EMAIL_SUBJECT_KEYWORDS` | `120` / empty | How far back the mailbox is read · optional subject filter |
+
+## Free-form disputes (any customer email)
+
+There is one graph. Scenario buttons and pasted or received emails go through the same flow; the scenarios are
+only sample inputs. Paste any billing email in the cockpit (with its **From** address) or send it to the mailbox:
+
+1. **Triage** extracts the customer, amounts (`1,250.00` and `1.250,00`), dates (English and Spanish), card, product,
+   language and intents. Every value copied by the model must appear in the email, or it is dropped. The model can
+   add caution, such as a manipulation flag, but it cannot remove a deterministic signal.
+2. **Investigation** looks at the real ledger. A charge is selected by id, or by amount refined by date, card and
+   product. When several fit, or the date rules them out, the agent asks instead of guessing. If the charge is not in
+   the last 90 days it searches 365.
+3. **Policies** are retrieved with hybrid RAG in English terms, whatever language the email is in. A decision citing
+   a clause that is not in the handbook is escalated.
+4. **The engine decides**, charge by charge. Partial refunds and cancellations go to a person (POL-ESC-002).
+5. **A human approves** payouts above $200, on HIGH risk, under unverified identity, after a manipulation signal, and
+   any refund the customer did not ask for (for example a duplicate found while answering a question).
+6. **The reply** is written in the customer's language (templates cover English and Spanish). It may cite billed
+   amounts of the charges in the case; it may never claim a refund that was not executed.
+7. **Questions and escalations reach people.** A reply from the same sender that cites our question continues the
+   case, using only that thread (three rounds at most). Escalations, rejections, failures and cancellations appear
+   in the **Review queue** tab and alert the supervisor.
+
+Identity for tickets from the cockpit or API: `sender_email` is checked like the email channel; `customer_email` is
+the operator's assertion; an account found only in the message text is unverified, so payouts need a human. The
+built-in scenarios are exempt because they are fixed text about demo accounts. Emails reported by the receiving
+server as failing DMARC (or both SPF and DKIM) are unverified too. The inbound webhook trusts its `from` field, so set
+`INBOUND_WEBHOOK_SECRET` when it is exposed. Attachments are not read.
 
 ## Design principles
 
@@ -88,10 +117,11 @@ Python's `tempfile`, so it follows `TEMP`/`TMP` (`TMPDIR` on macOS/Linux).
 | Models | `app/models/schemas.py` | Strict Pydantic v2 models for the whole domain |
 | Graph | `app/agent/graph.py` | `StateGraph`, conditional edges, self-correction/re-draft loops |
 | Nodes | `app/agent/nodes.py` | 9 nodes; `human_gate` uses `interrupt()` and resumes with `Command(resume=...)` |
-| Engine | `app/agent/engine.py` | Duplicate detection, gateway sync errors, fraud signals, per-tier windows, risk, plan |
+| Engine | `app/agent/engine.py` | Charge selection, duplicate detection, gateway sync errors, fraud signals, per-tier windows, risk, plan |
+| Dates | `app/agent/temporal.py` | Reads the dates customers mention (English and Spanish). A date only narrows down a charge |
 | Guardrails | `app/agent/guardrails.py` | Prompt-injection detection, fencing of untrusted input, grounding check |
 | LLM | `app/llm/` | Gemini (`google-genai`) / Groq; JSON mode + validation + self-repair, rate limiter, retries with backoff, circuit breaker |
-| RAG | `app/rag/` | `policies.md` (12 clauses) → ChromaDB (dense) + BM25 (sparse) fused with RRF |
+| RAG | `app/rag/` | `policies.md` (13 clauses) → ChromaDB (dense) + BM25 (sparse) fused with RRF |
 | Integrations | `app/integrations/` | Mock Stripe (idempotent, transactional), Mock CRM + email outbox, fault injector |
 | Runtime | `app/services/runtime.py` | `AsyncSqliteSaver`, background execution, SSE bus, HITL resume, crash recovery |
 | API | `app/main.py` | Async FastAPI + SSE |
@@ -104,8 +134,8 @@ Python's `tempfile`, so it follows `TEMP`/`TMP` (`TMPDIR` on macOS/Linux).
   then it escalates to a human **without moving money** (POL-ESC-001).
 - **Planner → DBInspector loop:** if the customer cites a charge outside the queried window (90 days), the
   planner asks for a re-query over 365 days.
-- **HITL:** payout > $200, payout with HIGH risk (fraud, ≥3 chargebacks, account < 7 days old) or any
-  manipulation attempt → `interrupt()`. The state survives process restarts (SQLite checkpoint; covered by a test).
+- **HITL:** payout > $200, payout with HIGH risk (fraud, ≥3 chargebacks, account < 7 days old, unverified
+  identity), a refund the customer did not request or any manipulation attempt → `interrupt()`. The state survives process restarts (SQLite checkpoint; covered by a test).
 - **LLM-as-a-Judge:** the final score is `min(LLM_score, deterministic_grounding_score)`, so a "fooled" judge
   cannot let an invented amount through. < 0.85 → re-draft with feedback; once the budget is spent, a template
   anchored to the facts is used.
@@ -149,9 +179,12 @@ account (or a verified alias, or mentioning one in the body) and watch the cockp
 skip the `HumanGate`: the graph still pauses with `interrupt()` (so it stays audited). What changes is who resumes it:
 if the case complies with policy, the runtime resumes it with the `auto-pilot` decision. It executes the refund,
 mirrors it to Stripe, passes the LLM Judge and dispatches the reply in ~4 s with zero clicks. **It still waits for a
-human** when there is: prompt injection · a sender who does not own the account · HIGH risk (fraud, chargebacks, new
-account) · an amount above `AUTOPILOT_MAX_USD` · any action other than a simple refund. In those cases the
-`autopilot_blocked` event (with the reasons) and the supervisor alert are emitted.
+human** when there is: prompt injection · a sender who does not own the account · unverified identity · HIGH risk
+(fraud, chargebacks, new account) · a refund the customer did not ask for · an amount above `AUTOPILOT_MAX_USD` or the
+fixed $200 limit · any action other than a simple refund. In those cases the `autopilot_blocked` event (with the
+reasons) and the supervisor alert are emitted. Low-risk payouts up to `HITL_THRESHOLD_USD` never reach the gate, so
+with the default threshold of $200 Auto-Pilot has nothing to approve. It only acts on policy-compliant payouts between
+a lower `HITL_THRESHOLD_USD` and $200.
 
 **⚙️ Conectar Casilla de Correo (connect mailbox).** A modal with Gmail / Google Workspace, Outlook / Office 365 or
 custom IMAP, and a step-by-step guide to create the App Password. **🧪 Probar Conexión** (`POST /api/email/test-connection`)
@@ -179,9 +212,10 @@ Note: the test balance can go negative, because Stripe does not return its fee o
 | Method | Route | Description |
 |---|---|---|
 | `GET` | `/health` · `/api/demo` | Liveness for the platform health check · demo-mode status and banner |
-| `POST` | `/api/tickets` | Creates a ticket (202) and runs the agent in the background |
+| `POST` | `/api/tickets` | Creates a ticket (202) and runs the agent in the background. `{message, sender_email?, customer_email?}` |
 | `GET` | `/api/tickets` · `/api/tickets/{id}` · `/api/tickets/{id}/events` | List · full checkpoint state · event history |
-| `POST` | `/api/tickets/{id}/decision` | HITL decision `{approved, reviewer, reason}` (409 if not waiting) |
+| `POST` | `/api/tickets/{id}/decision` | HITL decision `{approved, reviewer, reason}` (409 if not waiting). Machine reviewer names are refused; with `REVIEWER_TOKENS` the reviewer is the token's owner |
+| `GET`/`POST` | `/api/queue` · `/api/queue/{id}/resolve` | Cases waiting for a person · close one `{reviewer, note}`. Closing never moves money |
 | `GET` | `/api/approvals` | Tickets paused at `human_gate` |
 | `GET` | `/api/stream` | Server-Sent Events (`node_started`, `node_completed`, `interrupt`, `decision`, `run_completed`, …) |
 | `GET` | `/api/ledger` · `/api/graph` · `/api/health` · `/api/eval/report` | Refunds/outbox · topology · LLM status · latest eval report |
@@ -213,10 +247,14 @@ The metrics are implemented natively following DeepEval semantics (ToolCorrectne
 without depending on an OpenAI LLM to run in CI. `EVAL_LIVE=1` runs the same set against the configured provider.
 The JSON report is written to `reports/eval_report.json` and shown in the cockpit's **Evals** tab.
 
+**Autonomous set** (`tests/test_autonomous_dataset.py`, `tests/datasets/autonomous_tickets.json`): messy emails sent
+through the email channel, part of CI. Extend it whenever a new real-world failure shows up.
+`tests/test_audit_regressions.py` holds one regression test per issue found in the dynamic-dispute audit.
+
 **Held-out set** (`tests/heldout_eval.py`, 30 cases, `python -m tests.heldout_eval`): same group mix, different
 wording, amounts, languages and customers. It is not collected by pytest, not part of CI and never used to tune
-the agent. `ho_inj_fake_system_json` is contaminated (it motivated the role-spoofing detector, commit 19323eb),
-so headline held-out numbers exclude it.
+the agent. `ho_inj_fake_system_json` (it motivated the role-spoofing detector, commit 19323eb) and
+`ho_rw_pro_reimburse_in_window` (it exposed a wording bug) are contaminated, so headline held-out numbers exclude them.
 
 Current deterministic-engine results (the CI configuration): see the baseline rows of
 [`reports/benchmarks/SUMMARY.md`](reports/benchmarks/SUMMARY.md).
